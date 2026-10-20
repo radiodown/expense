@@ -1,5 +1,5 @@
 import { useId, useRef, useState } from 'react';
-import { createTransactionSchema, methods, transactionTypes, won } from '../shared/ledger.js';
+import { createTransactionSchema, methods, transactionTypes, categoryType, refundLabel, won } from '../shared/ledger.js';
 
 export default function InlineTransactionRow({ transaction, categories, fixedExpenses, transactions, onSave, onClose, busy }) {
   const [draft, setDraft] = useState({ ...transaction, isRefund: !!transaction.isRefund, fixedExpenseId: transaction.fixedExpenseId || null });
@@ -46,13 +46,13 @@ export default function InlineTransactionRow({ transaction, categories, fixedExp
         <label className="inline-refund"><input {...field} type="checkbox" checked={draft.isRefund} onChange={e => {
           const checked = e.target.checked;
           setDraft(d => ({ ...d, isRefund: checked, fixedExpenseId: checked ? null : d.fixedExpenseId })); setError('');
-        }} />취소·환급</label>
+        }} />{refundLabel(draft.type)}</label>
       </td>
       <td><input {...field} className="inline-title" aria-label="내용" autoFocus required maxLength={100} value={draft.title} onChange={e => set('title', e.target.value)} /></td>
       <td><select {...field} className="inline-category" aria-label="카테고리" value={draft.category} onChange={e => set('category', e.target.value)}>
-        {categories.filter(c => c.type === draft.type).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        {categories.filter(c => c.type === categoryType(draft.type)).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
       </select></td>
-      <td><input {...field} className="inline-method" aria-label={draft.type === 'income' ? '입금 수단' : '결제 수단'} required maxLength={100} list={`${formId}-methods`} value={draft.method} onChange={e => set('method', e.target.value)} />
+      <td><input {...field} className="inline-method" aria-label={draft.type === 'saving' ? '저축 계좌·수단' : draft.type === 'income' ? '입금 수단' : '결제 수단'} required maxLength={100} list={`${formId}-methods`} value={draft.method} onChange={e => set('method', e.target.value)} />
         <datalist id={`${formId}-methods`}>{methods.map(method => <option key={method} value={method} />)}</datalist>
       </td>
       <td><input {...field} className="inline-amount" aria-label="금액 (원)" type="number" required min="1" max="999999999999" step="1" value={draft.amount} onChange={e => set('amount', e.target.value)} /></td>

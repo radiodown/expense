@@ -160,7 +160,7 @@ test('current backup preserves payment links and rejects corrupt references; v1 
   const f = (await request('/api/fixed-expenses', 'POST', fixedSample)).body;
   await request('/api/transactions', 'POST', { ...sample, fixedExpenseId: f.id });
   const backup = (await request('/api/backup')).body;
-  assert.equal(backup.version, 4);
+  assert.equal(backup.version, 5);
   assert.equal((await request('/api/restore', 'POST', { ...backup, fixedExpenses: [] })).status, 400);
   assert.equal((await request('/api/restore', 'POST', { ...backup, fixedExpenses: undefined })).status, 400);
   assert.equal((await request('/api/restore', 'POST', { ...backup, transactions: [...backup.transactions, { ...backup.transactions[0], id: randomUUID() }] })).status, 400);
@@ -179,13 +179,15 @@ test('legacy SQLite migration preserves existing transactions and budget', async
   const old = new DatabaseSync(file);
   old.exec(`CREATE TABLE transactions (id TEXT PRIMARY KEY,type TEXT,amount INTEGER,date TEXT,title TEXT,category TEXT,method TEXT,note TEXT);
     CREATE TABLE budgets (month TEXT PRIMARY KEY,amount INTEGER);
-    INSERT INTO transactions VALUES ('legacy','expense',12345,'2026-10-10','기존 내역','food','현금','');
+    INSERT INTO transactions VALUES ('legacy','expense',12345,'2026-10-10','기존 내역','shopping','현금','');
     INSERT INTO budgets VALUES ('2026-10',100000);`);
   old.close();
   const migrated = await setup(t, file);
   const state = (await migrated.request('/api/state')).body;
   assert.equal(state.transactions[0].amount, 12345);
   assert.equal(state.transactions[0].fixedExpenseId, null);
+  assert.equal(state.transactions[0].category, 'shopping');
+  assert.ok(state.categories.some(c => c.id === 'shopping' && c.type === 'expense'));
   assert.equal(state.budgets['2026-10'], 100000);
   assert.deepEqual(state.fixedExpenses, []);
   await migrated.stop();
@@ -260,9 +262,9 @@ test('editable categories validate references and preserve linked records when r
   assert.equal((await request('/api/transactions', 'POST', { ...sample, type: 'income', category: c.id })).status, 400);
   const f = await request('/api/fixed-expenses', 'POST', { ...fixedSample, category: c.id });
   assert.equal(f.status, 201);
-  assert.equal((await request(`/api/categories/${c.id}`, 'PUT', { ...c, name: '보험', type: 'income' })).status, 400);
-  assert.equal((await request(`/api/categories/${c.id}`, 'PUT', { ...c, name: '보험' })).status, 200);
-  assert.equal((await request('/api/state')).body.categories.find(item => item.id === c.id).name, '보험');
+  assert.equal((await request(`/api/categories/${c.id}`, 'PUT', { ...c, name: '테스트 보험', type: 'income' })).status, 400);
+  assert.equal((await request(`/api/categories/${c.id}`, 'PUT', { ...c, name: '테스트 보험' })).status, 200);
+  assert.equal((await request('/api/state')).body.categories.find(item => item.id === c.id).name, '테스트 보험');
   await request('/api/budgets/2026-10/categories', 'PUT', { amounts: { [c.id]: 60000, other: 10000 } });
   await request('/api/budgets/2026-11/categories', 'PUT', { amounts: { [c.id]: 30000 } });
   assert.equal((await request(`/api/categories/${c.id}`, 'DELETE')).status, 204);
@@ -295,7 +297,7 @@ test('category budgets isolate months, allow explicit zero and validate before r
 
 test('existing expense becomes a paid fixed plan once without duplicating actual expenses', async t => {
   const { request } = await setup(t);
-  const c = (await request('/api/categories', 'POST', { name: '구독', type: 'expense' })).body;
+  const c = (await request('/api/categories', 'POST', { name: '테스트 구독', type: 'expense' })).body;
   const tx = (await request('/api/transactions', 'POST', { ...sample, category: c.id, method: '내 카드 1234', date: '2026-10-31', importKey: 'a'.repeat(64) })).body;
   const url = `/api/transactions/${tx.id}/fixed-expense`;
   const conversion = await request(url, 'POST', {});
@@ -388,7 +390,7 @@ test('XLSX endpoints reject malformed files and unknown previews without changin
   assert.equal((await request('/api/state')).body.transactions.length, 0);
 });
 
-test('transfer CRUD and v4 backup preserve direction and reject refund or fixed-plan classification', async t => {
+test('transfer CRUD and current backup preserve direction and reject refund or fixed-plan classification', async t => {
   const { request } = await setup(t);
   const transfer = { ...sample, type: 'transfer', category: 'transfer', transferDirection: 'out', method: '원본 계좌' };
   const created = await request('/api/transactions', 'POST', transfer);
@@ -400,7 +402,7 @@ test('transfer CRUD and v4 backup preserve direction and reject refund or fixed-
     assert.equal((await request('/api/transactions', 'POST', { ...transfer, ...patch })).status, 400);
   }
   const backup = (await request('/api/backup')).body;
-  assert.equal(backup.version, 4);
+  assert.equal(backup.version, 5);
   assert.equal(backup.transactions[0].transferDirection, 'in');
   assert.equal((await request('/api/restore', 'POST', { ...backup, transactions: [{ ...backup.transactions[0], transferDirection: null }] })).status, 400);
   assert.equal((await request('/api/restore', 'POST', { ...backup, version: 3 })).status, 400);
@@ -451,7 +453,7 @@ test('reimporting a previously imported workbook adds only missing transfers in 
 test('transfer schema migration preserves IDs, import metadata, payment links and custom budgets across restart', async t => {
   const file = path.join(tmpdir(), `moa-transfer-migration-${randomUUID()}.sqlite`);
   const first = await setup(t, file);
-  const c = (await first.request('/api/categories', 'POST', { name: '구독', type: 'expense' })).body;
+  const c = (await first.request('/api/categories', 'POST', { name: '테스트 구독', type: 'expense' })).body;
   const f = (await first.request('/api/fixed-expenses', 'POST', { ...fixedSample, category: c.id })).body;
   await first.request('/api/transactions', 'POST', { ...sample, category: c.id, fixedExpenseId: f.id, importKey: 'c'.repeat(64),
     importSource: { fileName: 'old.xlsx', sheet: 2, row: 9, category: '구독', subcategory: '', time: '12:00:00', originalAmount: -sample.amount } });
@@ -478,6 +480,112 @@ test('transfer schema migration preserves IDs, import metadata, payment links an
   await migrated.stop();
   const restarted = await setup(t, file);
   assert.equal((await restarted.request('/api/state')).body.transactions.find(t => t.type === 'transfer').transferDirection, 'out');
+  await restarted.stop();
+  for (const suffix of ['', '-wal', '-shm']) if (existsSync(file + suffix)) unlinkSync(file + suffix);
+});
+
+test('moving expenses to savings preserves source data, avoids duplicates and can be reversed', async t => {
+  const { request } = await setup(t);
+  const original = { ...sample, title: '정기 적금', importKey: 'd'.repeat(64), importSource: { fileName: 'original.xlsx', sheet: 2, row: 7, category: '고정', subcategory: '적금', time: '12:00:00', originalAmount: -sample.amount } };
+  const expense = (await request('/api/transactions', 'POST', original)).body;
+  await request('/api/budgets/2026-10', 'PUT', { amount: 100000 });
+  const before = (await request('/api/state')).body;
+  const moveUrl = `/api/transactions/${expense.id}/move`;
+  assert.equal((await request(moveUrl, 'POST', { type: 'saving' })).status, 200);
+  assert.equal((await request(moveUrl, 'POST', { type: 'saving' })).status, 409);
+  let state = (await request('/api/state')).body;
+  assert.equal(state.transactions.length, 1);
+  assert.deepEqual(state.transactions[0], { ...before.transactions[0], type: 'saving' });
+  assert.equal(summary(state.transactions, '2026-10').saving, sample.amount);
+  assert.equal(summary(state.transactions, '2026-10').expense, 0);
+  assert.equal(summary(state.transactions, '2026-10').balance, summary(before.transactions, '2026-10').balance);
+  assert.equal(budgetSummary(state, '2026-10').remaining, 100000);
+  const backup = (await request('/api/backup')).body;
+  assert.equal(backup.version, 5);
+  assert.equal((await request('/api/restore', 'POST', { ...backup, version: 4 })).status, 400);
+  assert.equal((await request('/api/restore', 'POST', backup)).status, 200);
+  assert.equal((await request(moveUrl, 'POST', { type: 'expense' })).status, 200);
+  state = (await request('/api/state')).body;
+  assert.deepEqual(state.transactions, before.transactions);
+  assert.equal((await request(moveUrl, 'POST', { type: 'income' })).status, 400);
+  assert.equal((await request('/api/transactions/missing/move', 'POST', { type: 'saving' })).status, 404);
+  const income = (await request('/api/transactions', 'POST', { ...sample, type: 'income', category: 'salary' })).body;
+  assert.equal((await request(`/api/transactions/${income.id}/move`, 'POST', { type: 'saving' })).status, 409);
+});
+
+test('savings support CRUD, refund amounts and category deletion without fixed-plan classification', async t => {
+  const { request } = await setup(t);
+  const category = (await request('/api/categories', 'POST', { name: '저축 분류 테스트', type: 'expense' })).body;
+  const saving = { ...sample, type: 'saving', category: category.id };
+  const created = await request('/api/transactions', 'POST', saving);
+  assert.equal(created.status, 201);
+  const url = `/api/transactions/${created.body.id}`;
+  assert.equal((await request(url, 'PUT', { ...saving, amount: 5000, isRefund: true })).status, 200);
+  assert.equal((await request(`${url}/fixed-expense`, 'POST', {})).status, 400);
+  for (const patch of [{ category: 'salary' }, { transferDirection: 'out' }, { fixedExpenseId: randomUUID() }]) {
+    assert.equal((await request('/api/transactions', 'POST', { ...saving, ...patch })).status, 400);
+  }
+  assert.equal((await request(`/api/categories/${category.id}`, 'DELETE')).status, 204);
+  const state = (await request('/api/state')).body;
+  assert.equal(state.transactions[0].category, 'other');
+  assert.equal(summary(state.transactions, '2026-10').saving, -5000);
+  assert.equal(summary(state.transactions, '2026-10').balance, 5000);
+  assert.equal((await request('/api/restore', 'POST', (await request('/api/backup')).body)).status, 200);
+  assert.equal((await request(url, 'DELETE')).status, 204);
+  assert.equal((await request('/api/state')).body.transactions.length, 0);
+});
+
+test('moving a linked expense to savings preserves its plan and releases the payment link', async t => {
+  const { request } = await setup(t);
+  const plan = (await request('/api/fixed-expenses', 'POST', fixedSample)).body;
+  const expense = (await request('/api/transactions', 'POST', { ...sample, category: plan.category, fixedExpenseId: plan.id })).body;
+  assert.equal((await request(`/api/transactions/${expense.id}/move`, 'POST', { type: 'saving' })).status, 200);
+  const state = (await request('/api/state')).body;
+  assert.equal(state.transactions[0].fixedExpenseId, null);
+  assert.equal(state.fixedExpenses[0].id, plan.id);
+  assert.equal(budgetSummary(state, '2026-10').paid, 0);
+  assert.equal(budgetSummary(state, '2026-10').pending, plan.amount);
+  assert.equal((await request('/api/transactions', 'POST', { ...sample, category: plan.category, fixedExpenseId: plan.id })).status, 201);
+});
+
+test('reimporting an expense moved to savings keeps its classification and skips duplicates', { skip: !existsSync(sampleWorkbook) }, async t => {
+  const { request } = await setup(t);
+  const payload = { fileName: '2025-10-20~2026-10-20.xlsx' };
+  const preview = (await request('/api/imports/preview', 'POST', payload)).body;
+  const months = ['2026-10'];
+  assert.equal((await request('/api/imports/commit', 'POST', { previewId: preview.previewId, months })).status, 200);
+  const before = (await request('/api/state')).body;
+  const expense = before.transactions.find(t => t.type === 'expense');
+  assert.equal((await request(`/api/transactions/${expense.id}/move`, 'POST', { type: 'saving' })).status, 200);
+  const nextPreview = (await request('/api/imports/preview', 'POST', payload)).body;
+  assert.equal(nextPreview.months.find(m => m.month === '2026-10').available, 0);
+  const imported = await request('/api/imports/commit', 'POST', { previewId: nextPreview.previewId, months });
+  assert.equal(imported.body.imported, 0);
+  const state = (await request('/api/state')).body;
+  assert.equal(state.transactions.length, before.transactions.length);
+  assert.equal(state.transactions.find(t => t.id === expense.id).type, 'saving');
+});
+
+test('existing transfer-capable databases upgrade for savings without changing records or categories', async t => {
+  const file = path.join(tmpdir(), `moa-saving-migration-${randomUUID()}.sqlite`);
+  const first = await setup(t, file);
+  await first.request('/api/transactions', 'POST', sample);
+  await first.request('/api/transactions', 'POST', { ...sample, type: 'transfer', category: 'transfer', transferDirection: 'in' });
+  await first.request('/api/budgets/2026-10', 'PUT', { amount: 100000 });
+  const before = (await first.request('/api/state')).body;
+  await first.stop();
+  const old = new DatabaseSync(file);
+  const schema = old.prepare("SELECT sql FROM sqlite_master WHERE name='transactions'").get().sql;
+  old.exec('ALTER TABLE transactions RENAME TO before_saving');
+  old.exec(schema.replace("'saving',", ''));
+  old.exec('INSERT INTO transactions SELECT * FROM before_saving; DROP TABLE before_saving;');
+  old.close();
+  const migrated = await setup(t, file);
+  assert.deepEqual((await migrated.request('/api/state')).body, before);
+  assert.equal((await migrated.request('/api/transactions', 'POST', { ...sample, type: 'saving' })).status, 201);
+  await migrated.stop();
+  const restarted = await setup(t, file);
+  assert.equal((await restarted.request('/api/state')).body.transactions.find(t => t.type === 'saving').amount, sample.amount);
   await restarted.stop();
   for (const suffix of ['', '-wal', '-shm']) if (existsSync(file + suffix)) unlinkSync(file + suffix);
 });

@@ -2,7 +2,8 @@ import { useState, useRef, lazy, Suspense } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { Icon, Modal, Empty, Metric, TransactionTable, InfiniteTransactionList, TransactionForm, FixedForm, BudgetForm } from './components.jsx';
-import { categories as defaultCategories, transactionTypes, transferSummary, fallbackCategory, today, currentMonth, monthLabel, shiftMonth, won, summary, trends, categoryTotals, categoryOf, makeDemo, backupSchema, budgetSummary, fixedDate, transactionValue } from '../shared/ledger.js';
+import { sortTransactions } from './transaction-sort.js';
+import { categories as defaultCategories, transactionTypes, categoryType, transferSummary, fallbackCategory, today, currentMonth, monthLabel, shiftMonth, won, summary, trends, categoryTotals, categoryOf, makeDemo, backupSchema, budgetSummary, fixedDate, transactionValue } from '../shared/ledger.js';
 
 const FlowChart = lazy(() => import('./Charts.jsx'));
 const ImportPanel = lazy(() => import('./ImportPanel.jsx'));
@@ -10,17 +11,18 @@ const CategoryManager = lazy(() => import('./ManagementPanels.jsx').then(m => ({
 const CategoryBudgets = lazy(() => import('./ManagementPanels.jsx').then(m => ({ default: m.CategoryBudgets })));
 const nav = [
   ['overview', '대시보드', 'LayoutDashboard'], ['income', '수입 내역', 'ArrowDownLeft'],
-  ['expense', '지출 내역', 'ArrowUpRight'], ['transfer', '이체 내역', 'ArrowLeftRight'], ['budget', '예산 · 고정지출', 'Goal'],
+  ['expense', '지출 내역', 'ArrowUpRight'], ['saving', '저축 내역', 'PiggyBank'], ['transfer', '이체 내역', 'ArrowLeftRight'], ['budget', '예산 · 고정지출', 'Goal'],
   ['analytics', '월별 분석', 'ChartNoAxesCombined'], ['settings', '데이터 관리', 'Settings2'],
 ];
-const shortLabels = { overview: '요약', income: '수입', expense: '지출', transfer: '이체', budget: '예산', analytics: '분석', settings: '설정' };
+const shortLabels = { overview: '요약', income: '수입', expense: '지출', saving: '저축', transfer: '이체', budget: '예산', analytics: '분석', settings: '설정' };
 const descriptions = {
   overview: '월별 수입·지출과 예산 집행 현황을 확인합니다.',
   income: '수입 내역을 등록하고 입금 항목별로 조회합니다.',
   expense: '실제 지출 내역을 등록하고 일반 지출과 고정지출을 구분합니다.',
+  saving: '저축 내역을 따로 관리합니다. 저축은 지출 합계와 예산 사용액에서 제외됩니다.',
   transfer: '계좌별 이체 입출금을 확인합니다. 수입·지출 및 예산 사용액에는 포함하지 않습니다.',
   budget: '총예산과 카테고리별 한도, 고정지출 지급 현황을 관리합니다.',
-  analytics: '최근 6개월 실적과 카테고리별 지출을 비교합니다.',
+  analytics: '최근 6개월 수입·지출·저축과 카테고리별 지출을 비교합니다.',
   settings: '카테고리 편집, 엑셀 가져오기 및 전체 데이터 백업을 관리합니다.',
 };
 async function api(path, method = 'GET', body) {
@@ -39,6 +41,7 @@ function Panel({ title, note, action, children }) {
   return <section className="panel"><div className="panel-heading"><div><h2>{title}</h2>{note && <p>{note}</p>}</div>{action}</div>{children}</section>;
 }
 function Chart({ data }) { return <Suspense fallback={<div className="chart-box loading">차트 불러오는 중…</div>}><FlowChart data={data} /></Suspense>; }
+function FlowLegend() { return <div className="chart-legend"><span className="income">■ 수입</span><span className="expense">■ 지출</span><span className="saving">■ 저축</span></div>; }
 
 export default function App() {
   const [view, setView] = useState('overview');
@@ -51,7 +54,7 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('all');
   const [kind, setKind] = useState('all');
-  const [sort, setSort] = useState('date');
+  const [sort, setSort] = useState({ key: 'date', direction: 'desc' });
   const fileInput = useRef();
   const client = useQueryClient();
   const query = useQuery({ queryKey: ['ledger'], queryFn: () => api('/state') });
@@ -62,26 +65,30 @@ export default function App() {
   const b = budgetSummary(data, month);
   const flow = trends(data.transactions, month);
   const cats = categoryTotals(s.items, categories);
-  const previousIncome = summary(data.transactions, shiftMonth(month, -1));
-  const incomeChange = s.income - previousIncome.income;
-  const hasPreviousIncome = previousIncome.items.some(t => t.type === 'income');
+  const previousSummary = summary(data.transactions, shiftMonth(month, -1));
+  const comparisonType = view === 'saving' ? 'saving' : 'income';
+  const previousAmount = previousSummary[comparisonType];
+  const amountChange = s[comparisonType] - previousAmount;
+  const hasPreviousAmount = previousSummary.items.some(t => t.type === comparisonType);
   const categoryShare = value => s.expense > 0 && value >= 0 ? `${(value / s.expense * 100).toFixed(1)}%` : '—';
   const sorted = [...s.items].sort((a, c) => c.date.localeCompare(a.date));
-  const isLedger = view === 'income' || view === 'expense' || view === 'transfer';
+  const isLedger = ['income', 'expense', 'saving', 'transfer'].includes(view);
   const ledgerItems = sorted.filter(t => t.type === view);
-  const filtered = ledgerItems.filter(t =>
+  const filtered = sortTransactions(ledgerItems.filter(t =>
     (category === 'all' || t.category === category) &&
     (view !== 'expense' || kind === 'all' || (kind === 'fixed' ? !!t.fixedExpenseId : !t.fixedExpenseId)) &&
     (view !== 'transfer' || kind === 'all' || t.transferDirection === kind) &&
-    `${t.title} ${categoryOf(t.category, categories).name} ${t.importSource?.category || ''} ${t.importSource?.subcategory || ''}`.toLowerCase().includes(search.toLowerCase()))
-    .sort((a, c) => sort === 'amount' ? c.amount - a.amount : c.date.localeCompare(a.date));
+    `${t.title} ${categoryOf(t.category, categories).name} ${t.importSource?.category || ''} ${t.importSource?.subcategory || ''}`.toLowerCase().includes(search.toLowerCase())), sort, categories);
   const filteredTotal = filtered.reduce((sum, t) => sum + transactionValue(t), 0);
   const transferTotals = transferSummary(ledgerItems);
   const fixed = [...b.fixed].sort((a, c) => a.day - c.day || a.title.localeCompare(c.title));
   const pendingFixed = fixed.filter(f => !b.links.has(f.id));
   const budgetRatio = b.budget ? s.expense / b.budget * 100 : 0;
 
-  function navigate(next) { setView(next); setSearch(''); setCategory('all'); setKind('all'); }
+  function navigate(next) { setView(next); setSearch(''); setCategory('all'); setKind('all'); setSort({ key: 'date', direction: 'desc' }); }
+  function sortColumn(key) {
+    setSort(current => ({ key, direction: current.key === key ? current.direction === 'asc' ? 'desc' : 'asc' : key === 'date' || key === 'amount' ? 'desc' : 'asc' }));
+  }
   function changeMonth(value) {
     if (/^\d{4}-(0[1-9]|1[0-2])$/.test(value) && value >= '1900-01' && value <= '2100-12') setMonth(value);
   }
@@ -94,11 +101,13 @@ export default function App() {
         const copied = action === 'copyFixed' ? demo.fixedExpenses.filter(f => f.month === shiftMonth(targetMonth, -1)).map(f => ({ ...f, id: crypto.randomUUID(), month: targetMonth })) : [];
         if (action === 'copyFixed' && (!copied.length || demo.fixedExpenses.some(f => f.month === targetMonth))) throw new Error('지난달 항목이 있고 이번 달 항목이 비어 있을 때 복사할 수 있습니다.');
         if (action === 'saveCategory' && categories.some(c => c.id !== id && c.type === payload.type && c.name.toLowerCase() === payload.name.toLowerCase())) throw new Error('같은 이름의 카테고리가 있습니다.');
-        const original = action === 'makeFixed' ? demo.transactions.find(t => t.id === id) : null;
+        const original = action === 'makeFixed' || action === 'move' ? demo.transactions.find(t => t.id === id) : null;
         if (action === 'makeFixed' && (!original || original.type !== 'expense' || original.isRefund || original.fixedExpenseId)) throw new Error('이미 연결되었거나 고정지출로 등록할 수 없는 내역입니다.');
+        if (action === 'move' && (!original || !['expense', 'saving'].includes(payload.type) || original.type !== (payload.type === 'saving' ? 'expense' : 'saving'))) throw new Error('지출과 저축 내역 사이에서만 이동할 수 있습니다.');
         setDemo(d => {
           if (action === 'save') return { ...d, transactions: id ? d.transactions.map(t => t.id === id ? { ...payload, id } : t) : [{ ...payload, id: generatedId }, ...d.transactions] };
           if (action === 'delete') return { ...d, transactions: d.transactions.filter(t => t.id !== id) };
+          if (action === 'move') return { ...d, transactions: d.transactions.map(t => t.id === id ? { ...t, type: payload.type, fixedExpenseId: null } : t) };
           if (action === 'budget') return { ...d, budgets: { ...d.budgets, [targetMonth]: payload.amount } };
           if (action === 'categoryBudgets') return { ...d, categoryBudgets: { ...d.categoryBudgets, [targetMonth]: payload.amounts } };
           if (action === 'saveCategory') return { ...d, categories: id ? d.categories.map(c => c.id === id ? { ...payload, id } : c) : [...d.categories, { ...payload, id: generatedId }] };
@@ -125,6 +134,7 @@ export default function App() {
       }
       if (action === 'save') return api(`/transactions${id ? `/${id}` : ''}`, id ? 'PUT' : 'POST', payload);
       if (action === 'delete') return api(`/transactions/${id}`, 'DELETE');
+      if (action === 'move') return api(`/transactions/${id}/move`, 'POST', payload);
       if (action === 'budget') return api(`/budgets/${targetMonth}`, 'PUT', payload);
       if (action === 'categoryBudgets') return api(`/budgets/${targetMonth}/categories`, 'PUT', payload);
       if (action === 'saveCategory') return api(`/categories${id ? `/${id}` : ''}`, id ? 'PUT' : 'POST', payload);
@@ -135,11 +145,11 @@ export default function App() {
       if (action === 'copyFixed') return api(`/budgets/${targetMonth}/copy-fixed`, 'POST', {});
       if (action === 'restore') return api('/restore', 'POST', payload);
     },
-    onSuccess: async (_result, { action }) => {
+    onSuccess: async (_result, { action, payload }) => {
       await client.invalidateQueries({ queryKey: ['ledger'] });
       setEntry(null); setFixedEntry(null); setBudgetOpen(false); setRestore(null);
       if (action === 'deleteCategory') setCategory('all');
-      toast.success(demo ? '데모 데이터에 반영했습니다.' : action === 'makeFixed' ? '고정지출로 등록하고 기존 지출을 지급 완료로 연결했습니다.' : action.startsWith('delete') ? '삭제했습니다.' : '변경사항을 저장했습니다.');
+      toast.success(demo ? '데모 데이터에 반영했습니다.' : action === 'move' ? payload.type === 'saving' ? '저축으로 이동했습니다.' : '지출로 되돌렸습니다.' : action === 'makeFixed' ? '고정지출로 등록하고 기존 지출을 지급 완료로 연결했습니다.' : action.startsWith('delete') ? '삭제했습니다.' : '변경사항을 저장했습니다.');
     },
     onError: error => toast.error(error.message),
   });
@@ -171,6 +181,7 @@ export default function App() {
       {view === 'transfer' && <button className="button" onClick={() => navigate('settings')}>엑셀 가져오기</button>}
       {view === 'income' && <button className="button primary" onClick={() => setEntry({ type: 'income' })}><Icon name="Plus" />수입 등록</button>}
       {view === 'expense' && <button className="button primary" onClick={() => setEntry({ type: 'expense' })}><Icon name="Plus" />지출 등록</button>}
+      {view === 'saving' && <button className="button primary" onClick={() => setEntry({ type: 'saving' })}><Icon name="Plus" />저축 등록</button>}
       {view === 'transfer' && <button className="button primary" onClick={() => setEntry({ type: 'transfer' })}><Icon name="Plus" />이체 등록</button>}
       {view === 'budget' && <button className="button primary" onClick={() => setFixedEntry({})}><Icon name="Plus" />고정지출 추가</button>}
     </div></header>
@@ -180,7 +191,7 @@ export default function App() {
         {view === 'budget' && budgetAction}</div>}
 
       {view === 'overview' && <>
-        <div className="metrics"><Metric title="수입 합계" value={won(s.income)} note={`${s.items.filter(t => t.type === 'income').length}건`} tone="positive" /><Metric title="지출 합계" value={won(s.expense)} note={`${s.items.filter(t => t.type === 'expense').length}건`} /><Metric title="월 수지" value={won(s.balance)} note="해당 월 수입 − 지출 (이월 잔액 제외)" tone={s.balance < 0 ? 'negative' : ''} /><Metric title="예산 잔액" value={b.budget ? won(b.remaining) : '미설정'} note={b.budget ? `실제 지출 기준 · 사용률 ${budgetRatio.toFixed(1)}%` : '예산 메뉴에서 총예산을 설정하세요.'} tone={b.budget && b.remaining < 0 ? 'negative' : 'emphasis'} /></div>
+        <div className="metrics five"><Metric title="수입 합계" value={won(s.income)} note={`${s.items.filter(t => t.type === 'income').length}건`} tone="positive" /><Metric title="지출 합계" value={won(s.expense)} note={`${s.items.filter(t => t.type === 'expense').length}건`} /><Metric title="저축 합계" value={won(s.saving)} note={`${s.items.filter(t => t.type === 'saving').length}건 · 지출 제외`} tone="saving" /><Metric title="월 수지" value={won(s.balance)} note="해당 월 수입 − 지출 − 저축" tone={s.balance < 0 ? 'negative' : ''} /><Metric title="예산 잔액" value={b.budget ? won(b.remaining) : '미설정'} note={b.budget ? `실제 지출 기준 · 사용률 ${budgetRatio.toFixed(1)}%` : '예산 메뉴에서 총예산을 설정하세요.'} tone={b.budget && b.remaining < 0 ? 'negative' : 'emphasis'} /></div>
         <div className="overview-grid"><Panel title="예산 집행 현황" action={<button className="link-button" onClick={() => navigate('budget')}>예산 관리 →</button>}>
           <div className="panel-body"><div className="progress-label"><span>실제 지출 / 총예산</span><strong>{b.budget ? `${won(s.expense)} / ${won(b.budget)}` : '예산 미설정'}</strong></div><div className="progress-track"><span className={budgetRatio > 100 ? 'over' : ''} style={{ width: `${Math.max(0, Math.min(budgetRatio, 100))}%` }} /></div>
             <dl className="summary-list"><div><dt>고정지출 예정 합계</dt><dd>{won(b.planned)}</dd></div><div><dt>미지급 고정지출</dt><dd>{pendingFixed.length}건 / {won(b.pending)}</dd></div><div><dt>추가 사용 가능액</dt><dd className={b.budget && b.available < 0 ? 'danger-text' : ''}>{b.budget ? won(b.available) : '—'}</dd></div></dl>
@@ -189,19 +200,19 @@ export default function App() {
           {pendingFixed.length ? <div className="table-scroll"><table><thead><tr><th>예정일</th><th>항목</th><th className="number">예정 금액</th><th>처리</th></tr></thead><tbody>{pendingFixed.slice(0, 5).map(f => <tr key={f.id}><td className={fixedDate(f) < today() ? 'danger-text nowrap' : 'nowrap'}>{fixedDate(f)}</td><td>{f.title}</td><td className="number nowrap">{won(f.amount)}</td><td><button className="table-button" onClick={() => recordFixed(f)}>지출 등록</button></td></tr>)}</tbody></table></div> : <Empty text="미지급 고정지출이 없습니다." />}
           {pendingFixed.length > 5 && <button className="panel-footer-button" onClick={() => navigate('budget')}>미지급 {pendingFixed.length}건 전체 보기</button>}
         </Panel></div>
-        <Panel title="최근 거래" note="선택한 달의 최근 8건" action={<div className="toolbar"><button className="link-button" onClick={() => navigate('income')}>수입 내역 →</button><button className="link-button" onClick={() => navigate('expense')}>지출 내역 →</button></div>}><TransactionTable items={sorted.slice(0, 8)} categories={categories} busy={busy} onEdit={setEntry} onDelete={item => save('delete', undefined, item.id)} onMakeFixed={item => save('makeFixed', undefined, item.id)} /></Panel>
-        <div className="overview-grid"><Panel title="월별 수입·지출 추이" action={<div className="chart-legend"><span className="income">■ 수입</span><span className="expense">■ 지출</span></div>}><Chart data={flow} /></Panel><Panel title="카테고리별 지출" note="실제 지출 기준">{cats.length ? <div className="table-scroll"><table><thead><tr><th>카테고리</th><th className="number">지출</th><th className="number">비중</th></tr></thead><tbody>{cats.map(c => <tr key={c.id}><td>{c.name}</td><td className="number">{won(c.value)}</td><td className="number">{categoryShare(c.value)}</td></tr>)}</tbody></table></div> : <Empty />}</Panel></div>
+        <Panel title="최근 거래" note="선택한 달의 최근 8건" action={<div className="toolbar"><button className="link-button" onClick={() => navigate('income')}>수입 내역 →</button><button className="link-button" onClick={() => navigate('expense')}>지출 내역 →</button><button className="link-button" onClick={() => navigate('saving')}>저축 내역 →</button></div>}><TransactionTable items={sorted.slice(0, 8)} categories={categories} busy={busy} onEdit={setEntry} onDelete={item => save('delete', undefined, item.id)} onMakeFixed={item => save('makeFixed', undefined, item.id)} onMove={(item, type) => save('move', { type }, item.id)} /></Panel>
+        <div className="overview-grid"><Panel title="월별 수입·지출·저축 추이" action={<FlowLegend />}><Chart data={flow} /></Panel><Panel title="카테고리별 지출" note="실제 지출 기준">{cats.length ? <div className="table-scroll"><table><thead><tr><th>카테고리</th><th className="number">지출</th><th className="number">비중</th></tr></thead><tbody>{cats.map(c => <tr key={c.id}><td>{c.name}</td><td className="number">{won(c.value)}</td><td className="number">{categoryShare(c.value)}</td></tr>)}</tbody></table></div> : <Empty />}</Panel></div>
       </>}
 
       {isLedger && <>
         {view === 'transfer' ? <div className="metrics three"><Metric title="월 이체 입금" value={won(transferTotals.incoming)} note="원본 계좌에 들어온 금액 · 필터 적용 전" /><Metric title="월 이체 출금" value={won(transferTotals.outgoing)} note="원본 계좌에서 나간 금액 · 필터 적용 전" /><Metric title="조회 이체 입출금 차액" value={won(filteredTotal)} note={`${filtered.length}건 · 입금 − 출금 · 수입·지출 합계 제외`} tone="emphasis" /></div> :
-          <div className="metrics three"><Metric title={`월 ${view === 'income' ? '수입' : '지출'} 합계`} value={won(view === 'income' ? s.income : s.expense)} note={`${ledgerItems.length}건 · 필터 적용 전`} /><Metric title="조회 결과 합계" value={won(filteredTotal)} note={`${filtered.length}건 · 검색 및 필터 적용`} tone="emphasis" /><Metric title={view === 'income' ? '전월 대비 수입 증감' : '고정지출 실지급액'} value={view === 'income' ? hasPreviousIncome ? `${incomeChange > 0 ? '+' : ''}${won(incomeChange)}` : '비교 내역 없음' : won(b.paid)} note={view === 'income' ? hasPreviousIncome ? `전월 수입 ${won(previousIncome.income)} · 월 전체 기준` : '전월 수입 내역을 등록하면 비교됩니다.' : `일반 지출 ${won(b.variable)}`} /></div>}
+          <div className="metrics three"><Metric title={`월 ${transactionTypes[view]} 합계`} value={won(s[view])} note={`${ledgerItems.length}건 · 필터 적용 전`} tone={view === 'saving' ? 'saving' : ''} /><Metric title="조회 결과 합계" value={won(filteredTotal)} note={`${filtered.length}건 · 검색 및 필터 적용`} tone="emphasis" /><Metric title={view === 'expense' ? '고정지출 실지급액' : `전월 대비 ${transactionTypes[view]} 증감`} value={view === 'expense' ? won(b.paid) : hasPreviousAmount ? `${amountChange > 0 ? '+' : ''}${won(amountChange)}` : '비교 내역 없음'} note={view === 'expense' ? `일반 지출 ${won(b.variable)}` : hasPreviousAmount ? `전월 ${transactionTypes[view]} ${won(previousAmount)} · 월 전체 기준` : `전월 ${transactionTypes[view]} 내역을 등록하면 비교됩니다.`} /></div>}
         <Panel title={`${transactionTypes[view]} 목록`} action={<span className="badge">{filtered.length}건</span>}>
-          <div className="filters"><label className="search-field"><span>검색</span><input placeholder="내용 또는 카테고리" value={search} onChange={e => setSearch(e.target.value)} /></label>{view !== 'transfer' && <label>카테고리<select value={category} onChange={e => setCategory(e.target.value)}><option value="all">전체 카테고리</option>{categories.filter(c => c.type === view).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>}
+          <div className="filters"><label className="search-field"><span>검색</span><input placeholder="내용 또는 카테고리" value={search} onChange={e => setSearch(e.target.value)} /></label>{view !== 'transfer' && <label>카테고리<select value={category} onChange={e => setCategory(e.target.value)}><option value="all">전체 카테고리</option>{categories.filter(c => c.type === categoryType(view)).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>}
             {view === 'expense' && <label>지출 구분<select value={kind} onChange={e => setKind(e.target.value)}><option value="all">전체 지출</option><option value="fixed">고정지출</option><option value="variable">일반 지출</option></select></label>}
             {view === 'transfer' && <label>이체 방향<select value={kind} onChange={e => setKind(e.target.value)}><option value="all">입출금 전체</option><option value="in">입금</option><option value="out">출금</option></select></label>}
-            <label>정렬<select value={sort} onChange={e => setSort(e.target.value)}><option value="date">최신순</option><option value="amount">금액 높은순</option></select></label><button className="button" onClick={() => { setSearch(''); setCategory('all'); setKind('all'); setSort('date'); }}>필터 초기화</button></div>
-          <InfiniteTransactionList key={JSON.stringify([view, month, search, category, kind, sort, !!demo])} items={filtered} total={filteredTotal} totalLabel={view === 'transfer' ? '이체 입출금 차액' : '조회 합계'} label={`${transactionTypes[view]} 목록`} pageScroll={view !== 'transfer'} categories={categories} busy={busy} onEdit={setEntry} fixedExpenses={fixedExpenses} transactions={data.transactions} onInlineSave={view === 'transfer' ? undefined : (payload, id) => mutation.mutateAsync({ action: 'save', payload, id })} onDelete={item => save('delete', undefined, item.id)} onMakeFixed={item => save('makeFixed', undefined, item.id)} />
+            {view === 'transfer' && <label>정렬<select value={sort.key} onChange={e => setSort({ key: e.target.value, direction: 'desc' })}><option value="date">최신순</option><option value="amount">금액 높은순</option></select></label>}<button className="button" onClick={() => { setSearch(''); setCategory('all'); setKind('all'); setSort({ key: 'date', direction: 'desc' }); }}>필터 초기화</button></div>
+          <InfiniteTransactionList key={JSON.stringify([view, month, search, category, kind, sort, !!demo])} items={filtered} total={filteredTotal} totalLabel={view === 'transfer' ? '이체 입출금 차액' : '조회 합계'} label={`${transactionTypes[view]} 목록`} pageScroll={view !== 'transfer'} sort={sort} onSort={view === 'transfer' ? undefined : sortColumn} categories={categories} busy={busy} onEdit={setEntry} fixedExpenses={fixedExpenses} transactions={data.transactions} onInlineSave={view === 'transfer' ? undefined : (payload, id) => mutation.mutateAsync({ action: 'save', payload, id })} onDelete={item => save('delete', undefined, item.id)} onMakeFixed={item => save('makeFixed', undefined, item.id)} onMove={(item, type) => save('move', { type }, item.id)} />
         </Panel>
       </>}
 
@@ -225,8 +236,8 @@ export default function App() {
       </>}
 
       {view === 'analytics' && <>
-        <Panel title="최근 6개월 실적" note={`${monthLabel(flow[0].key)} ~ ${monthLabel(month)}`} action={<div className="chart-legend"><span className="income">■ 수입</span><span className="expense">■ 지출</span></div>}><Chart data={flow} /><div className="table-scroll"><table><thead><tr><th>월</th><th className="number">수입</th><th className="number">지출</th><th className="number">월 수지</th><th className="number">예산</th><th className="number">예산 잔액</th></tr></thead><tbody>{flow.map(f => <tr key={f.key}><td>{monthLabel(f.key)}</td><td className="number income">{won(f.income)}</td><td className="number">{won(f.expense)}</td><td className={`number ${f.balance < 0 ? 'danger-text' : ''}`}>{won(f.balance)}</td><td className="number">{data.budgets[f.key] ? won(data.budgets[f.key]) : '—'}</td><td className="number">{data.budgets[f.key] ? won(data.budgets[f.key] - f.expense) : '—'}</td></tr>)}</tbody></table></div></Panel>
-        <Panel title="카테고리별 지출 상세" note="선택한 달의 실제 지출 기준">{cats.length ? <div className="table-scroll"><table><thead><tr><th>카테고리</th><th className="number">건수</th><th className="number">지출 금액</th><th className="number">비중</th></tr></thead><tbody>{cats.map(c => <tr key={c.id}><td>{c.name}</td><td className="number">{s.items.filter(t => t.category === c.id).length}</td><td className="number">{won(c.value)}</td><td className="number">{categoryShare(c.value)}</td></tr>)}</tbody></table></div> : <Empty />}</Panel>
+        <Panel title="최근 6개월 실적" note={`${monthLabel(flow[0].key)} ~ ${monthLabel(month)}`} action={<FlowLegend />}><Chart data={flow} /><div className="table-scroll"><table><thead><tr><th>월</th><th className="number">수입</th><th className="number">지출</th><th className="number">저축</th><th className="number">월 수지</th><th className="number">예산</th><th className="number">예산 잔액</th></tr></thead><tbody>{flow.map(f => <tr key={f.key}><td>{monthLabel(f.key)}</td><td className="number income">{won(f.income)}</td><td className="number">{won(f.expense)}</td><td className="number saving">{won(f.saving)}</td><td className={`number ${f.balance < 0 ? 'danger-text' : ''}`}>{won(f.balance)}</td><td className="number">{data.budgets[f.key] ? won(data.budgets[f.key]) : '—'}</td><td className="number">{data.budgets[f.key] ? won(data.budgets[f.key] - f.expense) : '—'}</td></tr>)}</tbody></table></div></Panel>
+        <Panel title="카테고리별 지출 상세" note="선택한 달의 실제 지출 기준">{cats.length ? <div className="table-scroll"><table><thead><tr><th>카테고리</th><th className="number">건수</th><th className="number">지출 금액</th><th className="number">비중</th></tr></thead><tbody>{cats.map(c => <tr key={c.id}><td>{c.name}</td><td className="number">{s.items.filter(t => t.type === 'expense' && t.category === c.id).length}</td><td className="number">{won(c.value)}</td><td className="number">{categoryShare(c.value)}</td></tr>)}</tbody></table></div> : <Empty />}</Panel>
       </>}
 
       {view === 'settings' && <>
@@ -236,12 +247,12 @@ export default function App() {
           <div className="setting-row"><div><h3>전체 백업</h3><p>모든 거래, 카테고리, 월별·카테고리별 예산, 고정지출 항목과 연결 정보를 포함합니다.</p></div><button className="button" disabled={!!demo} onClick={exportBackup}><Icon name="Download" />JSON 백업</button></div>
           <div className="setting-row"><div><h3>백업 복원</h3><p>현재 전체 데이터를 백업 내용으로 교체합니다. 이전 버전 백업도 지원합니다.</p></div><button className="button" disabled={!!demo} onClick={() => fileInput.current.click()}>백업 파일 선택</button><input hidden ref={fileInput} type="file" accept=".json,application/json" onChange={chooseBackup} /></div>{demo && <p className="help">백업과 복원은 데모 종료 후 사용할 수 있습니다.</p>}
         </div></Panel>
-        <Panel title="데모 데이터"><div className="setting-row panel-body"><p>실제 데이터를 변경하지 않고 수입·지출, 예산 및 고정지출 기능을 확인합니다.</p><button className="button" onClick={() => { toggleDemo(); navigate('overview'); }}>{demo ? '데모 종료' : '데모 시작'}</button></div></Panel>
+        <Panel title="데모 데이터"><div className="setting-row panel-body"><p>실제 데이터를 변경하지 않고 수입·지출·저축, 예산 및 고정지출 기능을 확인합니다.</p><button className="button" onClick={() => { toggleDemo(); navigate('overview'); }}>{demo ? '데모 종료' : '데모 시작'}</button></div></Panel>
       </>}
     </>}
-    <footer>로컬 저장 · 수입·지출 합계는 환급 차감 및 이체 제외 <span>금액 단위: 원 (KRW)</span></footer>
+    <footer>로컬 저장 · 수입·지출·저축 별도 집계 · 이체 제외 <span>금액 단위: 원 (KRW)</span></footer>
     </main>
-    <Modal open={!!entry} onClose={() => setEntry(null)} busy={busy} title={`${transactionTypes[entry?.type] || '거래'} ${entry?.id ? '수정' : '등록'}`} description={demo ? '데모 데이터에만 반영됩니다.' : entry?.type === 'transfer' ? '계좌 기준 이체 방향과 금액을 입력하세요.' : '실제 입금 또는 지출 내역을 입력하세요.'}>{entry && <TransactionForm entry={entry} month={month} categories={categories} fixedExpenses={fixedExpenses} transactions={data.transactions} busy={busy} onSave={(payload, id) => save('save', payload, id)} />}</Modal>
+    <Modal open={!!entry} onClose={() => setEntry(null)} busy={busy} title={`${transactionTypes[entry?.type] || '거래'} ${entry?.id ? '수정' : '등록'}`} description={demo ? '데모 데이터에만 반영됩니다.' : entry?.type === 'transfer' ? '계좌 기준 이체 방향과 금액을 입력하세요.' : entry?.type === 'saving' ? '저축 날짜, 금액과 계좌를 입력하세요.' : '실제 입금 또는 지출 내역을 입력하세요.'}>{entry && <TransactionForm entry={entry} month={month} categories={categories} fixedExpenses={fixedExpenses} transactions={data.transactions} busy={busy} onSave={(payload, id) => save('save', payload, id)} />}</Modal>
     <Modal open={fixedEntry !== null} onClose={() => setFixedEntry(null)} busy={busy} title={`고정지출 ${fixedEntry?.id ? '수정' : '추가'}`} description={`${monthLabel(month)} 지출 계획`}>{fixedEntry !== null && <FixedForm item={fixedEntry.id ? fixedEntry : null} month={month} categories={categories} busy={busy} onSave={(payload, id) => save('saveFixed', payload, id)} />}</Modal>
     <Modal open={budgetOpen} onClose={() => setBudgetOpen(false)} busy={busy} title="월 총예산 설정" description={monthLabel(month)}>{budgetOpen && <BudgetForm amount={b.budget} planned={b.planned} busy={busy} onSave={amount => save('budget', { amount })} />}</Modal>
     <Modal open={!!restore} onClose={() => setRestore(null)} busy={busy} title="전체 데이터를 복원할까요?" description="현재 거래, 예산 및 고정지출 항목 전체가 교체됩니다. 필요한 데이터는 먼저 백업하세요.">

@@ -7,11 +7,12 @@ import { z } from 'zod';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { categories, categorySchema, categoryBudgetSchema, createTransactionSchema, createFixedExpenseSchema, fallbackCategory, monthSchema, budgetSchema, backupSchema, shiftMonth } from '../shared/ledger.js';
+import { legacyCategories } from '../shared/categories.js';
 import { parseXlsx, describeImport, MAX_XLSX_BYTES } from './xlsx-import.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const transactionTableSql = `CREATE TABLE IF NOT EXISTS transactions (
-  id TEXT PRIMARY KEY, type TEXT NOT NULL CHECK(type IN ('income','expense','transfer')),
+  id TEXT PRIMARY KEY, type TEXT NOT NULL CHECK(type IN ('income','expense','saving','transfer')),
   amount INTEGER NOT NULL CHECK(amount > 0), date TEXT NOT NULL,
   title TEXT NOT NULL, category TEXT NOT NULL, method TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
   fixedExpenseId TEXT, isRefund INTEGER NOT NULL DEFAULT 0, importKey TEXT, importSource TEXT,
@@ -43,7 +44,7 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
     CREATE UNIQUE INDEX IF NOT EXISTS fixed_payment ON transactions(fixedExpenseId) WHERE fixedExpenseId IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS imported_record ON transactions(importKey) WHERE importKey IS NOT NULL;`;
   // SQLite CHECK constraints require a table rebuild. Copy and index creation are atomic.
-  if (!db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").get().sql.includes("'transfer'")) {
+  if (!db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'").get().sql.includes("'saving'")) {
     db.exec('BEGIN IMMEDIATE');
     try {
       db.exec(`ALTER TABLE transactions RENAME TO transactions_legacy;
@@ -59,7 +60,9 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
   if (!db.prepare("SELECT value FROM settings WHERE key='categories-initialized'").get()) {
     db.exec('BEGIN IMMEDIATE');
     try {
-      for (const c of categories) putCategory(c.id, c);
+      const referenced = new Set(db.prepare('SELECT category FROM transactions UNION SELECT category FROM fixed_expenses UNION SELECT category FROM category_budgets').all().map(row => row.category));
+      const defaults = [...categories, ...legacyCategories.filter(c => referenced.has(c.id) && !categories.some(current => current.id === c.id))];
+      for (const c of defaults) putCategory(c.id, c);
       db.prepare('INSERT INTO settings VALUES (?,?)').run('categories-initialized', '1');
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -238,6 +241,17 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
     if (!result.changes) return res.status(404).json({ error: '기록을 찾을 수 없습니다.' });
     res.status(204).end();
   });
+  app.post('/api/transactions/:id/move', (req, res) => {
+    const move = parse(z.object({ type: z.enum(['expense', 'saving']) }), req.body, res);
+    if (!move) return;
+    const previousType = move.type === 'saving' ? 'expense' : 'saving';
+    const existing = db.prepare('SELECT type FROM transactions WHERE id=?').get(req.params.id);
+    if (!existing) return res.status(404).json({ error: '기록을 찾을 수 없습니다.' });
+    if (existing.type !== previousType) return res.status(409).json({ error: '지출과 저축 내역 사이에서만 이동할 수 있습니다.' });
+    const result = db.prepare('UPDATE transactions SET type=?,fixedExpenseId=NULL WHERE id=? AND type=?').run(move.type, req.params.id, previousType);
+    if (!result.changes) return res.status(409).json({ error: '이미 변경된 내역입니다. 목록을 새로고침해 주세요.' });
+    res.json({ id: req.params.id, type: move.type });
+  });
   app.post('/api/transactions/:id/fixed-expense', (req, res) => {
     const t = db.prepare('SELECT * FROM transactions WHERE id=?').get(req.params.id);
     if (!t) return res.status(404).json({ error: '기록을 찾을 수 없습니다.' });
@@ -277,7 +291,7 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
     res.json(b);
   });
   app.get('/api/backup', (_req, res) => {
-    res.attachment('moa-backup.json').json({ version: 4, exportedAt: new Date().toISOString(), ...state() });
+    res.attachment('moa-backup.json').json({ version: 5, exportedAt: new Date().toISOString(), ...state() });
   });
   app.post('/api/fixed-expenses', (req, res) => {
     const f = parse(createFixedExpenseSchema(categoryList()), req.body, res);

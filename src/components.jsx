@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as ContextMenu from '@radix-ui/react-context-menu';
-import { LayoutDashboard, ArrowDownLeft, ArrowUpRight, ArrowLeftRight, ChartNoAxesCombined, Settings2, Plus, Pencil, Trash2, X, ChevronLeft, ChevronRight, Download, Search, Goal, Copy, Check, LoaderCircle, Database } from 'lucide-react';
-import { categories as defaultCategories, transferCategory, transactionTypes, transactionLabel, methods, createTransactionSchema, createFixedExpenseSchema, today, currentMonth, categoryOf, won, cashValue } from '../shared/ledger.js';
+import { LayoutDashboard, ArrowDownLeft, ArrowUpRight, ArrowLeftRight, ArrowUp, ArrowDown, ArrowUpDown, PiggyBank, ChartNoAxesCombined, Settings2, Plus, Pencil, Trash2, X, ChevronLeft, ChevronRight, Download, Search, Goal, Copy, Check, LoaderCircle, Database } from 'lucide-react';
+import { categories as defaultCategories, transferCategory, transactionTypes, transactionLabel, categoryType, refundLabel, methods, createTransactionSchema, createFixedExpenseSchema, today, currentMonth, categoryOf, won, cashValue } from '../shared/ledger.js';
 import InlineTransactionRow from './InlineTransactionRow.jsx';
+import { transactionColumns } from './transaction-sort.js';
 
-const icons = { LayoutDashboard, ArrowDownLeft, ArrowUpRight, ArrowLeftRight, ChartNoAxesCombined, Settings2, Plus, Pencil, Trash2, X, ChevronLeft, ChevronRight, Download, Search, Goal, Copy, Check, LoaderCircle, Database };
+const icons = { LayoutDashboard, ArrowDownLeft, ArrowUpRight, ArrowLeftRight, ArrowUp, ArrowDown, ArrowUpDown, PiggyBank, ChartNoAxesCombined, Settings2, Plus, Pencil, Trash2, X, ChevronLeft, ChevronRight, Download, Search, Goal, Copy, Check, LoaderCircle, Database };
 export function Icon({ name, size = 18, ...props }) {
   const Component = icons[name] || Database;
   return <Component size={size} strokeWidth={1.8} {...props} />;
@@ -22,33 +23,44 @@ export function Empty({ text = '등록된 내역이 없습니다.' }) { return <
 export function Metric({ title, value, note, tone = '' }) {
   return <div className={`metric ${tone}`}><span>{title}</span><strong>{value}</strong><small>{note}</small></div>;
 }
-function FixedExpenseContextMenu({ transaction, onMakeFixed, disabled, children }) {
-  if (disabled || !onMakeFixed || transaction.type !== 'expense' || transaction.fixedExpenseId || transaction.isRefund) return children;
+function TransactionContextMenu({ transaction, onMakeFixed, onMove, disabled, children }) {
+  const canMakeFixed = onMakeFixed && transaction.type === 'expense' && !transaction.fixedExpenseId && !transaction.isRefund;
+  const canMove = onMove && (transaction.type === 'expense' || transaction.type === 'saving');
+  if (disabled || (!canMakeFixed && !canMove)) return children;
   return <ContextMenu.Root modal={false}>
     <ContextMenu.Trigger asChild className="transaction-context-row">{children}</ContextMenu.Trigger>
     <ContextMenu.Portal>
       <ContextMenu.Content className="transaction-context-menu" collisionPadding={8} aria-label={`${transaction.title} 작업`}>
-        <ContextMenu.Item className="transaction-context-item" onSelect={() => onMakeFixed(transaction)}>고정지출 등록</ContextMenu.Item>
+        {canMakeFixed && <ContextMenu.Item className="transaction-context-item" onSelect={() => onMakeFixed(transaction)}>고정지출 등록</ContextMenu.Item>}
+        {canMove && <ContextMenu.Item className="transaction-context-item" onSelect={() => onMove(transaction, transaction.type === 'expense' ? 'saving' : 'expense')}>{transaction.type === 'expense' ? '저축으로 보내기' : '지출로 되돌리기'}</ContextMenu.Item>}
       </ContextMenu.Content>
     </ContextMenu.Portal>
   </ContextMenu.Root>;
 }
-export function TransactionTable({ items, categories = defaultCategories, onEdit, onInlineSave, fixedExpenses = [], transactions = [], onDelete, onMakeFixed, busy, scrollRef, scrollLabel, footer, pageScroll = false }) {
+function TransactionColumnHeader({ column, sort, onSort, disabled }) {
+  const active = !!onSort && sort?.key === column.key;
+  return <th scope="col" className={`${column.numeric ? 'number ' : ''}${onSort ? 'sortable-header' : ''}`} aria-sort={active ? sort.direction === 'asc' ? 'ascending' : 'descending' : undefined}>
+    {onSort ? <button type="button" className="column-sort-button" data-active={active || undefined} disabled={disabled} aria-label={`${column.label} 정렬`} onClick={() => onSort(column.key)}>
+      <span>{column.label}</span><Icon name={active ? sort.direction === 'asc' ? 'ArrowUp' : 'ArrowDown' : 'ArrowUpDown'} size={14} aria-hidden="true" />
+    </button> : column.label}
+  </th>;
+}
+export function TransactionTable({ items, categories = defaultCategories, onEdit, onInlineSave, fixedExpenses = [], transactions = [], onDelete, onMakeFixed, onMove, busy, scrollRef, scrollLabel, footer, pageScroll = false, sort, onSort }) {
   const [editingId, setEditingId] = useState(null);
   const activeEditingId = items.some(t => t.id === editingId) ? editingId : null;
   const actionsDisabled = busy || activeEditingId !== null;
   function edit(item) {
-    if (onInlineSave && (item.type === 'income' || item.type === 'expense')) setEditingId(item.id);
+    if (onInlineSave && item.type !== 'transfer') setEditingId(item.id);
     else onEdit(item);
   }
   if (!items.length) return <Empty />;
-  return <div className={`table-scroll${pageScroll ? ' page-scroll-table' : ''}`} ref={scrollRef} role={scrollLabel ? 'region' : undefined} aria-label={scrollLabel} tabIndex={scrollLabel ? 0 : undefined}><table><thead><tr><th>날짜</th><th>구분</th><th>내용</th><th>카테고리</th><th>계좌·결제수단</th><th className="number">금액</th><th className="actions-cell">관리</th></tr></thead>
-    <tbody>{items.map(t => activeEditingId === t.id ? <InlineTransactionRow key={t.id} transaction={t} categories={categories} fixedExpenses={fixedExpenses} transactions={transactions} busy={busy} onSave={onInlineSave} onClose={() => setEditingId(null)} /> : <FixedExpenseContextMenu key={t.id} transaction={t} onMakeFixed={onMakeFixed} disabled={actionsDisabled}><tr>
-      <td className="nowrap">{t.date}</td><td><span className={`badge ${t.type}`}>{t.fixedExpenseId ? '고정지출' : transactionLabel(t)}</span>{t.isRefund && <small className="cell-note">취소·환급</small>}</td>
+  return <div className={`table-scroll${pageScroll ? ' page-scroll-table' : ''}`} ref={scrollRef} role={scrollLabel ? 'region' : undefined} aria-label={scrollLabel} tabIndex={scrollLabel ? 0 : undefined}><table><thead><tr>{transactionColumns.map(column => <TransactionColumnHeader key={column.key} column={column} sort={sort} onSort={onSort} disabled={actionsDisabled} />)}<th scope="col" className="actions-cell">관리</th></tr></thead>
+    <tbody>{items.map(t => activeEditingId === t.id ? <InlineTransactionRow key={t.id} transaction={t} categories={categories} fixedExpenses={fixedExpenses} transactions={transactions} busy={busy} onSave={onInlineSave} onClose={() => setEditingId(null)} /> : <TransactionContextMenu key={t.id} transaction={t} onMakeFixed={onMakeFixed} onMove={onMove} disabled={actionsDisabled}><tr>
+      <td className="nowrap">{t.date}</td><td><span className={`badge ${t.type}`}>{t.fixedExpenseId ? '고정지출' : transactionLabel(t)}</span>{t.isRefund && <small className="cell-note">{refundLabel(t.type)}</small>}</td>
       <td className="title-cell"><button className="link-button" disabled={actionsDisabled} onClick={() => edit(t)}>{t.title}</button></td><td>{categoryOf(t.category, categories).name}{t.importSource && <small className="cell-note">원본: {[t.importSource.category, t.importSource.subcategory].filter(Boolean).join(' / ')}</small>}</td><td>{t.method}</td>
       <td className={`number nowrap ${t.type}`}>{cashValue(t) >= 0 ? '+' : '−'}{won(t.amount)}</td>
       <td><div className="row-actions"><button className="table-button" disabled={actionsDisabled} aria-label={`${t.title} 수정`} onClick={() => edit(t)}>수정</button><button className="table-button danger-text" disabled={actionsDisabled} aria-label={`${t.title} 삭제`} onClick={() => onDelete(t)}>삭제</button></div></td>
-    </tr></FixedExpenseContextMenu>)}</tbody>{footer}</table></div>;
+    </tr></TransactionContextMenu>)}</tbody>{footer}</table></div>;
 }
 
 const TRANSACTION_BATCH_SIZE = 30;
@@ -87,7 +99,7 @@ export function InfiniteTransactionList({ items, total, label, totalLabel = '조
 export function TransactionForm({ entry, month, categories = defaultCategories, fixedExpenses, transactions, onSave, busy }) {
   const [form, setForm] = useState({
     amount: '', title: '', date: month === currentMonth() ? today() : `${month}-01`,
-    category: entry.type === 'transfer' ? 'transfer' : categories.find(c => c.type === entry.type)?.id, method: entry.type === 'expense' ? '신용카드' : '계좌이체',
+    category: entry.type === 'transfer' ? 'transfer' : categories.find(c => c.type === categoryType(entry.type))?.id, method: entry.type === 'expense' ? '신용카드' : '계좌이체',
     fixedExpenseId: null, isRefund: false, transferDirection: entry.type === 'transfer' ? 'out' : null, ...entry,
   });
   const [error, setError] = useState('');
@@ -102,10 +114,10 @@ export function TransactionForm({ entry, month, categories = defaultCategories, 
   return <form onSubmit={submit} className="entry-form"><fieldset disabled={busy}>
     <div className="form-grid"><label>날짜<input type="date" min="1900-01-01" max="2100-12-31" required value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value, fixedExpenseId: f.date.slice(0, 7) === e.target.value.slice(0, 7) ? f.fixedExpenseId : null }))} /></label>
       <label>금액 (원)<input autoFocus type="number" required min="1" max="999999999999" step="1" value={form.amount} onChange={e => set('amount', e.target.value)} /></label></div>
-    <label>{transactionTypes[form.type]} 내용<input required maxLength={100} placeholder={form.type === 'transfer' ? '계좌 이동, 카드대금 이체 등' : form.type === 'income' ? '급여, 부수입 등' : '구매처 또는 지출 항목'} value={form.title} onChange={e => set('title', e.target.value)} /></label>
+    <label>{transactionTypes[form.type]} 내용<input required maxLength={100} placeholder={form.type === 'transfer' ? '계좌 이동, 카드대금 이체 등' : form.type === 'saving' ? '적금, 저축 계좌 입금 등' : form.type === 'income' ? '급여, 부수입 등' : '구매처 또는 지출 항목'} value={form.title} onChange={e => set('title', e.target.value)} /></label>
     {form.type === 'transfer' && <label>이체 방향<select value={form.transferDirection} onChange={e => set('transferDirection', e.target.value)}><option value="out">출금 (−)</option><option value="in">입금 (+)</option></select><small>해당 계좌 기준의 입출금입니다. 수입·지출 및 예산 사용액에 포함하지 않습니다.</small></label>}
-    <div className="form-grid"><label>카테고리<select value={form.category} onChange={e => set('category', e.target.value)}>{(form.type === 'transfer' ? [transferCategory] : categories.filter(c => c.type === form.type)).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label><label>{form.type === 'transfer' ? '계좌·수단' : form.type === 'income' ? '입금 수단' : '결제 수단'}<input list="payment-methods" required maxLength={100} value={form.method} onChange={e => set('method', e.target.value)} /><datalist id="payment-methods">{methods.map(m => <option key={m} value={m} />)}</datalist></label></div>
-    {form.type !== 'transfer' && <label className="checkbox-label"><input type="checkbox" checked={form.isRefund} onChange={e => setForm(f => ({ ...f, isRefund: e.target.checked, fixedExpenseId: e.target.checked ? null : f.fixedExpenseId }))} />취소·환급 내역 ({transactionTypes[form.type]} 합계에서 차감)</label>}
+    <div className="form-grid"><label>카테고리<select value={form.category} onChange={e => set('category', e.target.value)}>{(form.type === 'transfer' ? [transferCategory] : categories.filter(c => c.type === categoryType(form.type))).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label><label>{form.type === 'transfer' || form.type === 'saving' ? '계좌·수단' : form.type === 'income' ? '입금 수단' : '결제 수단'}<input list="payment-methods" required maxLength={100} value={form.method} onChange={e => set('method', e.target.value)} /><datalist id="payment-methods">{methods.map(m => <option key={m} value={m} />)}</datalist></label></div>
+    {form.type !== 'transfer' && <label className="checkbox-label"><input type="checkbox" checked={form.isRefund} onChange={e => setForm(f => ({ ...f, isRefund: e.target.checked, fixedExpenseId: e.target.checked ? null : f.fixedExpenseId }))} />{refundLabel(form.type)} 내역 ({transactionTypes[form.type]} 합계에서 차감)</label>}
     {form.type === 'expense' && !form.isRefund && <label>고정지출 연결<select value={form.fixedExpenseId || ''} onChange={e => set('fixedExpenseId', e.target.value || null)}><option value="">연결하지 않음 (일반 지출)</option>{options.map(f => <option key={f.id} value={f.id}>{f.title} · 예정 {won(f.amount)}</option>)}</select><small>연결하면 해당 월의 고정지출이 지급 완료로 표시됩니다.</small></label>}
     {form.importSource && <div className="import-provenance"><strong>엑셀 원본</strong><p>{form.importSource.fileName} · 두 번째 시트 · {form.importSource.row}행</p><p>{form.importSource.category} / {form.importSource.subcategory} · {form.importSource.time}</p></div>}
     {error && <p className="error-text" role="alert">{error}</p>}

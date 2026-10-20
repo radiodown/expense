@@ -1,6 +1,6 @@
 import { readSheet } from 'read-excel-file/node';
 import { createHash } from 'node:crypto';
-import { transactionSchema, transactionValue, transferSummary } from '../shared/ledger.js';
+import { categories, transactionSchema, transactionValue, transferSummary } from '../shared/ledger.js';
 
 export const MAX_XLSX_BYTES = 10 * 1024 * 1024;
 const text = v => v == null ? '' : String(v).trim();
@@ -19,16 +19,18 @@ function timeText(value) {
 }
 function categoryFor(type, major, minor) {
   if (type === 'transfer') return 'transfer';
+  const available = categories.filter(c => c.type === type);
+  const matching = available.find(c => c.name === major) || available.find(c => c.name === minor);
+  if (matching) return matching.id;
   if (type === 'income') {
-    if (/급여|월급|상여/.test(major)) return 'salary';
+    if (/급여|월급/.test(major)) return 'salary';
     if (/금융|이자|배당/.test(major)) return 'interest';
-    if (/부수입|부업/.test(major)) return 'side';
+    if (/상여|부수입|부업/.test(major)) return 'side';
     return 'income-other';
   }
   if (/점심|식비|외식|식사/.test(major)) return 'food';
   if (/카페|간식/.test(major)) return 'cafe';
   if (/교통|자동차/.test(major)) return 'transport';
-  if (/쇼핑|의류/.test(major)) return 'shopping';
   if (/병원|의료|건강/.test(major)) return 'health';
   if (/문화|여가|여행/.test(major)) return 'culture';
   if (/주거|통신/.test(major) || (major === '고정' && /월세|관리비|가스|전기|수도|인터넷|통신/.test(minor))) return 'home';

@@ -16,6 +16,18 @@ test('monthly totals isolate months and preserve negative balances', () => {
   assert.equal(categoryTotals(result.items)[0].value, 13000);
   assert.equal(summary([], '2026-10').rate, null);
 });
+
+test('old backups retain discontinued categories and can be exported again after restore', () => {
+  const transaction = { id: '00000000-0000-4000-8000-000000000001', type: 'expense', date: '2026-10-01', title: '이전 쇼핑 내역', category: 'shopping', method: '현금', amount: 1000 };
+  const fixed = { id: '00000000-0000-4000-8000-000000000002', month: '2026-10', title: '이전 예정 항목', category: 'shopping', method: '현금', amount: 1000, day: 1 };
+  assert.equal(transactionSchema.safeParse(transaction).success, false);
+  for (const version of [1, 2]) {
+    const restored = backupSchema.parse({ version, transactions: [transaction], budgets: {}, ...(version === 2 ? { fixedExpenses: [fixed] } : {}) });
+    assert.equal(restored.transactions[0].category, 'shopping');
+    assert.equal(restored.categories.find(c => c.id === 'shopping').name, '쇼핑');
+    assert.ok(backupSchema.safeParse({ ...restored, version: 4 }).success);
+  }
+});
 test('six month trends cross years and include empty months', () => {
   const result = trends([], '2026-02');
   assert.deepEqual(result.map(t => t.key), ['2025-09', '2025-10', '2025-11', '2025-12', '2026-01', '2026-02']);
@@ -33,7 +45,7 @@ test('demo records are valid, uniquely identified and separate from storage', ()
   assert.equal(Object.keys(demo.budgets).length, 6);
   assert.equal(new Set(demo.transactions.map(t => t.id)).size, demo.transactions.length);
   assert.ok(demo.transactions.every(t => transactionSchema.safeParse(t).success));
-  assert.ok(backupSchema.safeParse({ version: 2, ...demo }).success);
+  assert.ok(backupSchema.safeParse({ version: 5, ...demo }).success);
 });
 test('budget reserves unpaid plans and counts actual fixed payments only once', () => {
   const data = { budgets: { '2026-10': 1000 }, fixedExpenses: [
@@ -98,4 +110,41 @@ test('transfer schemas reject missing direction, refunds and fixed plan links', 
   for (const patch of [{ transferDirection: null }, { transferDirection: 'wrong' }, { category: 'food' }, { isRefund: true }, { fixedExpenseId: '00000000-0000-4000-8000-000000000001' }, { type: 'expense', category: 'food' }]) {
     assert.equal(transactionSchema.safeParse({ ...transfer, ...patch }).success, false);
   }
+});
+
+test('savings and withdrawals are separate from spending while monthly cash balance includes both', () => {
+  const transactions = [
+    { date: '2026-10-01', type: 'income', amount: 100000, category: 'salary' },
+    { date: '2026-10-02', type: 'expense', amount: 20000, category: 'food' },
+    { date: '2026-10-03', type: 'saving', amount: 30000, category: 'food' },
+    { date: '2026-10-04', type: 'saving', amount: 5000, category: 'food', isRefund: true },
+    { date: '2026-10-05', type: 'transfer', amount: 999999, category: 'transfer', transferDirection: 'in' },
+    { date: '2026-09-01', type: 'saving', amount: 999, category: 'other' },
+  ];
+  const result = summary(transactions, '2026-10');
+  assert.equal(result.income, 100000);
+  assert.equal(result.expense, 20000);
+  assert.equal(result.saving, 25000);
+  assert.equal(result.balance, 55000);
+  assert.ok(Math.abs(result.rate - 55) < 1e-10);
+  assert.equal(cashValue(transactions[2]), -30000);
+  assert.equal(cashValue(transactions[3]), 5000);
+  assert.equal(budgetSummary({ transactions, budgets: { '2026-10': 50000 } }, '2026-10').remaining, 30000);
+  assert.equal(categoryTotals(result.items)[0].value, 20000);
+  const months = trends(transactions, '2026-10');
+  assert.equal(months.at(-1).saving, 25000);
+  assert.equal(months.at(-2).saving, 999);
+  assert.equal(months.at(-3).saving, 0);
+});
+
+test('savings use expense classifications and require v5 backups without fixed-payment links', () => {
+  const saving = { id: '00000000-0000-4000-8000-000000000001', type: 'saving', amount: 10000, date: '2026-10-01', title: '적금', category: 'other', method: '저축 통장' };
+  assert.ok(transactionSchema.safeParse(saving).success);
+  assert.ok(transactionSchema.safeParse({ ...saving, isRefund: true }).success);
+  for (const patch of [{ category: 'salary' }, { transferDirection: 'out' }, { fixedExpenseId: '00000000-0000-4000-8000-000000000002' }]) {
+    assert.equal(transactionSchema.safeParse({ ...saving, ...patch }).success, false);
+  }
+  const backup = { ...makeDemo('2026-10'), version: 5, transactions: [saving], fixedExpenses: [] };
+  assert.ok(backupSchema.safeParse(backup).success);
+  assert.equal(backupSchema.safeParse({ ...backup, version: 4 }).success, false);
 });

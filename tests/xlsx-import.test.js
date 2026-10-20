@@ -22,6 +22,18 @@ test('second-sheet parser preserves dates, time, method, memo and original class
   assert.equal(t.importSource.row, 2);
   assert.equal(t.importSource.originalAmount, -12000);
 });
+
+test('imports recognize the configured defaults without dropping discontinued categories', () => {
+  const rows = categories.map(c => ['2026-10-02', 0.5, c.type === 'income' ? '수입' : '지출', c.name, '미분류', '기본 분류', c.type === 'income' ? 1000 : -1000, 'KRW', '현금', '']);
+  rows.push(row.map((value, index) => index === 3 ? '쇼핑' : value));
+  rows.push(row.map((value, index) => index === 3 ? '고정' : index === 4 ? '보험' : value));
+  const parsed = parseLedgerRows([headers, ...rows], 'defaults.xlsx');
+  assert.equal(parsed.skipped.length, 0);
+  assert.deepEqual(parsed.records.slice(0, categories.length).map(record => record.transaction.category), categories.map(c => c.id));
+  assert.equal(parsed.records.at(-2).transaction.category, 'other');
+  assert.equal(parsed.records.at(-1).transaction.category, categories.find(c => c.type === 'expense' && c.name === '보험').id);
+  assert.equal(parsed.records.at(-2).transaction.importSource.category, '쇼핑');
+});
 test('unsupported types, zero amounts, other currencies and invalid rows are explicitly excluded', () => {
   const invalid = [
     row.map((v, i) => i === 2 ? '알 수 없음' : v),

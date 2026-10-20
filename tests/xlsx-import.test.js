@@ -49,15 +49,15 @@ test('unsupported types, zero amounts, other currencies and invalid rows are exp
   assert.ok(parsed.skipped.some(r => r.reason === '0원'));
   assert.throws(() => parseLedgerRows([['날짜', '내용']], 'test.xlsx'), /두 번째 시트/);
 });
-test('transfer rows retain account direction and source metadata without being treated as refunds', () => {
+test('transfer rows are imported as expenses with incoming amounts deducted and source metadata retained', () => {
   const outbound = row.map((v, i) => i === 2 ? '이체' : v);
   const inbound = outbound.map((v, i) => i === 6 ? 12000 : i === 8 ? '다른 계좌' : v);
   const parsed = parseLedgerRows([headers, outbound, inbound, outbound.map((v, i) => i === 6 ? 0 : v)], 'transfers.xlsx');
   const transfers = parsed.records.map(r => r.transaction);
   assert.equal(transfers.length, 2);
-  assert.equal(transfers[0].transferDirection, 'out');
-  assert.equal(transfers[1].transferDirection, 'in');
-  assert.ok(transfers.every(t => t.type === 'transfer' && t.category === 'transfer' && !t.isRefund && !t.fixedExpenseId));
+  assert.equal(transfers[0].isRefund, false);
+  assert.equal(transfers[1].isRefund, true);
+  assert.ok(transfers.every(t => t.type === 'expense' && t.category === 'food' && t.importSource.type === '이체' && t.transferDirection === null && !t.fixedExpenseId));
   assert.equal(transfers[0].importSource.originalAmount, -12000);
   assert.equal(transfers[1].method, '다른 계좌');
   assert.equal(transfers[1].importSource.row, 3);
@@ -68,6 +68,7 @@ test('transfer rows retain account direction and source metadata without being t
   assert.equal(preview.months[0].transferIn, 12000);
   assert.equal(preview.months[0].transferOut, 12000);
   assert.equal(preview.months[0].income, 0);
+  assert.equal(preview.months[0].expenseCount, 2);
   assert.equal(preview.months[0].expense, 0);
   assert.equal(describeImport(parsed, new Set([transfers[0].importKey])).months[0].transferOut, 0);
 });
@@ -93,15 +94,16 @@ test('actual sample second sheet matches independent monthly sums, with every ro
   const parsed = await parseXlsx(buffer, 'sample.xlsx');
   const raw = await readSheet(buffer, 2);
   assert.equal(parsed.records.length, 1937);
-  assert.equal(parsed.records.filter(r => r.transaction.type === 'transfer').length, 281);
+  assert.equal(parsed.records.filter(r => r.transaction.importSource.type === '이체').length, 281);
+  assert.ok(parsed.records.every(r => r.transaction.type !== 'transfer'));
   assert.equal(parsed.skipped.length, 23);
-  assert.equal(parsed.records.filter(r => r.transaction.isRefund).length, 32);
+  assert.equal(parsed.records.filter(r => r.transaction.isRefund && r.transaction.importSource.type !== '이체').length, 32);
   assert.equal(parsed.months.length, 13);
   const transactions = parsed.records.map(r => r.transaction);
   for (const month of parsed.months) {
     const rows = raw.slice(1).filter(r => r[0].toISOString().startsWith(month));
     const income = rows.filter(r => r[2] === '수입').reduce((s, r) => s + r[6], 0);
-    const expense = -rows.filter(r => r[2] === '지출').reduce((s, r) => s + r[6], 0);
+    const expense = -rows.filter(r => r[2] === '지출' || r[2] === '이체').reduce((s, r) => s + r[6], 0);
     assert.equal(summary(transactions, month).income, income, `${month} income`);
     assert.equal(summary(transactions, month).expense, expense, `${month} expense`);
     const transfers = transferSummary(transactions.filter(t => t.date.startsWith(month)));

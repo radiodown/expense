@@ -46,7 +46,7 @@ export default function InlineTransactionRow({ transaction, categories, fixedExp
         <label className="inline-refund"><input {...field} type="checkbox" checked={draft.isRefund} onChange={e => {
           const checked = e.target.checked;
           setDraft(d => ({ ...d, isRefund: checked, fixedExpenseId: checked ? null : d.fixedExpenseId })); setError('');
-        }} />{refundLabel(draft.type)}</label>
+        }} />{refundLabel(draft.type, draft.importSource)}</label>
       </td>
       <td><input {...field} className="inline-title" aria-label="내용" autoFocus required maxLength={100} value={draft.title} onChange={e => set('title', e.target.value)} /></td>
       <td><select {...field} className="inline-category" aria-label="카테고리" value={draft.category} onChange={e => set('category', e.target.value)}>

@@ -15,7 +15,7 @@ export function sortTransactions(items, sort, categories) {
   const direction = sort.direction === 'asc' ? 1 : -1;
   function value(item) {
     if (sort.key === 'category') return categoryOf(item.category, categories).name;
-    if (sort.key === 'type') return `${item.fixedExpenseId ? '고정지출' : transactionLabel(item)}${item.isRefund ? ` ${refundLabel(item.type)}` : ''}`;
+    if (sort.key === 'type') return `${item.fixedExpenseId ? '고정지출' : transactionLabel(item)}${item.isRefund ? ` ${refundLabel(item.type, item.importSource)}` : ''}`;
     return item[sort.key];
   }
   return [...items].sort((a, b) => {

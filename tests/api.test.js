@@ -390,11 +390,13 @@ test('XLSX endpoints reject malformed files and unknown previews without changin
   assert.equal((await request('/api/state')).body.transactions.length, 0);
 });
 
-test('transfer CRUD and current backup preserve direction and reject refund or fixed-plan classification', async t => {
+test('legacy transfer requests become expenses and retain their signed cash value through backup', async t => {
   const { request } = await setup(t);
   const transfer = { ...sample, type: 'transfer', category: 'transfer', transferDirection: 'out', method: '원본 계좌' };
   const created = await request('/api/transactions', 'POST', transfer);
   assert.equal(created.status, 201);
+  assert.equal(created.body.type, 'expense');
+  assert.equal(created.body.isRefund, false);
   const url = `/api/transactions/${created.body.id}`;
   assert.equal((await request(url, 'PUT', { ...transfer, transferDirection: 'in' })).status, 200);
   assert.equal((await request(`${url}/fixed-expense`, 'POST', {})).status, 400);
@@ -403,15 +405,18 @@ test('transfer CRUD and current backup preserve direction and reject refund or f
   }
   const backup = (await request('/api/backup')).body;
   assert.equal(backup.version, 5);
-  assert.equal(backup.transactions[0].transferDirection, 'in');
-  assert.equal((await request('/api/restore', 'POST', { ...backup, transactions: [{ ...backup.transactions[0], transferDirection: null }] })).status, 400);
-  assert.equal((await request('/api/restore', 'POST', { ...backup, version: 3 })).status, 400);
+  assert.equal(backup.transactions[0].type, 'expense');
+  assert.equal(backup.transactions[0].isRefund, true);
+  assert.equal(backup.transactions[0].transferDirection, null);
+  assert.equal((await request('/api/restore', 'POST', { ...backup, transactions: [{ ...backup.transactions[0], transferDirection: 'in' }] })).status, 400);
+  assert.equal((await request('/api/restore', 'POST', { ...backup, version: 3 })).status, 200);
   assert.equal((await request(url, 'DELETE')).status, 204);
   assert.equal((await request('/api/restore', 'POST', backup)).status, 200);
   const restored = (await request('/api/state')).body;
-  assert.equal(restored.transactions[0].transferDirection, 'in');
+  assert.equal(restored.transactions[0].isRefund, true);
+  assert.equal(restored.transactions[0].transferDirection, null);
   assert.equal(restored.transactions[0].method, '원본 계좌');
-  assert.equal(summary(restored.transactions, '2026-10').balance, 0);
+  assert.equal(summary(restored.transactions, '2026-10').balance, sample.amount);
 });
 
 test('reimporting a previously imported workbook adds only missing transfers in selected months', { skip: !existsSync(sampleWorkbook) }, async t => {
@@ -419,15 +424,15 @@ test('reimporting a previously imported workbook adds only missing transfers in 
   const preview = (await request('/api/imports/preview', 'POST', { fileName: '2025-10-20~2026-10-20.xlsx' })).body;
   const months = ['2026-08', '2026-10'];
   const selected = preview.records.filter(r => months.includes(r.month)).map(r => r.transaction);
-  const legacyTransactions = selected.filter(t => t.type !== 'transfer').map(t => ({ ...t, id: randomUUID() }));
+  const legacyTransactions = selected.filter(t => t.importSource?.type !== '이체').map(t => ({ ...t, id: randomUUID() }));
   const legacy = { version: 3, transactions: legacyTransactions, fixedExpenses: [], budgets: { '2026-10': 100000 }, categoryBudgets: { '2026-10': { food: 50000 } }, categories };
   assert.equal((await request('/api/restore', 'POST', legacy)).status, 200);
   const newPreview = (await request('/api/imports/preview', 'POST', { fileName: '2025-10-20~2026-10-20.xlsx' })).body;
-  const expected = selected.filter(t => t.type === 'transfer').length;
+  const expected = selected.filter(t => t.importSource?.type === '이체').length;
   assert.ok(expected > 0);
   for (const m of newPreview.months.filter(m => months.includes(m.month))) {
     assert.equal(m.incomeCount, 0);
-    assert.equal(m.expenseCount, 0);
+    assert.equal(m.expenseCount, m.transferCount);
     assert.equal(m.available, m.transferCount);
   }
   const result = await request('/api/imports/commit', 'POST', { previewId: newPreview.previewId, months });
@@ -435,16 +440,16 @@ test('reimporting a previously imported workbook adds only missing transfers in 
   assert.equal(result.body.imported, expected);
   assert.equal(result.body.transfer, expected);
   assert.equal(result.body.income, 0);
-  assert.equal(result.body.expense, 0);
+  assert.equal(result.body.expense, expected);
   assert.equal(result.body.duplicates, legacyTransactions.length);
   const state = (await request('/api/state')).body;
   assert.equal(state.transactions.length, selected.length);
   assert.ok(state.transactions.every(t => months.includes(t.date.slice(0, 7))));
   for (const m of months) {
     assert.equal(summary(state.transactions, m).income, summary(legacyTransactions, m).income);
-    assert.equal(summary(state.transactions, m).expense, summary(legacyTransactions, m).expense);
+    assert.equal(summary(state.transactions, m).expense, summary(selected, m).expense);
   }
-  assert.equal(budgetSummary(state, '2026-10').remaining, budgetSummary(legacy, '2026-10').remaining);
+  assert.equal(budgetSummary(state, '2026-10').remaining, 100000 - summary(selected, '2026-10').expense);
   assert.deepEqual(state.categoryBudgets, legacy.categoryBudgets);
   assert.equal((await request('/api/imports/commit', 'POST', { previewId: newPreview.previewId, months })).body.imported, 0);
   assert.equal((await request('/api/restore', 'POST', (await request('/api/backup')).body)).status, 200);
@@ -479,7 +484,7 @@ test('transfer schema migration preserves IDs, import metadata, payment links an
   assert.ok(indexes.includes('fixed_payment') && indexes.includes('imported_record') && indexes.includes('transaction_date'));
   await migrated.stop();
   const restarted = await setup(t, file);
-  assert.equal((await restarted.request('/api/state')).body.transactions.find(t => t.type === 'transfer').transferDirection, 'out');
+  assert.equal((await restarted.request('/api/state')).body.transactions.find(t => t.category === 'other').type, 'expense');
   await restarted.stop();
   for (const suffix of ['', '-wal', '-shm']) if (existsSync(file + suffix)) unlinkSync(file + suffix);
 });
@@ -587,6 +592,61 @@ test('existing transfer-capable databases upgrade for savings without changing r
   const restarted = await setup(t, file);
   assert.equal((await restarted.request('/api/state')).body.transactions.find(t => t.type === 'saving').amount, sample.amount);
   await restarted.stop();
+  for (const suffix of ['', '-wal', '-shm']) if (existsSync(file + suffix)) unlinkSync(file + suffix);
+});
+
+test('stored transfers and old backups become expenses without changing IDs, import keys or cash direction', async t => {
+  const file = path.join(tmpdir(), `moa-transfer-expenses-${randomUUID()}.sqlite`);
+  const first = await setup(t, file);
+  await first.request('/api/transactions', 'POST', sample);
+  await first.request('/api/budgets/2026-10', 'PUT', { amount: 100000 });
+  const add = first.db.prepare("INSERT INTO transactions (id,type,amount,date,title,category,method,note,transferDirection,importKey,importSource) VALUES (?,'transfer',?,?,?,'transfer','original account','original note',?,?,?)");
+  const source = { fileName: 'old.xlsx', sheet: 2, row: 2, category: '이체', subcategory: '', time: '12:00:00', originalAmount: -5000 };
+  const outgoing = randomUUID(), incoming = randomUUID();
+  add.run(outgoing, 5000, '2026-10-05', 'outgoing', 'out', 'e'.repeat(64), JSON.stringify(source));
+  add.run(incoming, 3000, '2026-10-06', 'incoming', 'in', 'f'.repeat(64), JSON.stringify({ ...source, row: 3, originalAmount: 3000 }));
+  const before = (await first.request('/api/state')).body;
+  const rowids = first.db.prepare('SELECT id,rowid FROM transactions ORDER BY rowid').all();
+  await first.stop();
+  const migrated = await setup(t, file);
+  const state = (await migrated.request('/api/state')).body;
+  assert.equal(state.transactions.length, before.transactions.length);
+  assert.deepEqual(state.categories, before.categories);
+  assert.deepEqual(migrated.db.prepare('SELECT id,rowid FROM transactions ORDER BY rowid').all(), rowids);
+  for (const [id, deducted, amount, key] of [[outgoing, false, 5000, 'e'], [incoming, true, 3000, 'f']]) {
+    const record = state.transactions.find(tx => tx.id === id);
+    assert.equal(record.type, 'expense');
+    assert.equal(record.category, 'other');
+    assert.equal(record.isRefund, deducted);
+    assert.equal(record.amount, amount);
+    assert.equal(record.importKey, key.repeat(64));
+    assert.equal(record.importSource.type, '이체');
+    assert.equal(record.importSource.originalAmount, deducted ? amount : -amount);
+    assert.equal(record.transferDirection, null);
+    assert.equal(record.method, 'original account');
+    assert.equal(record.note, 'original note');
+  }
+  assert.equal(summary(state.transactions, '2026-10').expense, sample.amount + 2000);
+  assert.equal(budgetSummary(state, '2026-10').remaining, 100000 - sample.amount - 2000);
+  assert.equal((await migrated.request('/api/restore', 'POST', { ...before, version: 4 })).status, 200);
+  assert.deepEqual((await migrated.request('/api/state')).body, state);
+  await migrated.stop();
+  const restarted = await setup(t, file);
+  assert.deepEqual((await restarted.request('/api/state')).body, state);
+  await restarted.stop();
+  for (const suffix of ['', '-wal', '-shm']) if (existsSync(file + suffix)) unlinkSync(file + suffix);
+});
+
+test('converting old transfers rolls back all rows on a storage error', () => {
+  const file = path.join(tmpdir(), `moa-transfer-expenses-rollback-${randomUUID()}.sqlite`);
+  const original = createApp(file);
+  original.db.exec("INSERT INTO transactions (id,type,amount,date,title,category,method,note,transferDirection) VALUES ('first','transfer',5000,'2026-10-01','outgoing','transfer','account','','out'),('second','transfer',3000,'2026-10-02','incoming','transfer','account','','in'); CREATE TRIGGER fail_transfer_conversion BEFORE UPDATE ON transactions WHEN OLD.id='second' BEGIN SELECT RAISE(ABORT, 'test conversion rollback'); END;");
+  original.db.close();
+  assert.throws(() => createApp(file), /test conversion rollback/);
+  const retained = new DatabaseSync(file);
+  assert.equal(retained.prepare("SELECT count(*) AS count FROM transactions WHERE type='transfer'").get().count, 2);
+  assert.equal(retained.prepare('SELECT sum(amount) AS amount FROM transactions').get().amount, 8000);
+  retained.close();
   for (const suffix of ['', '-wal', '-shm']) if (existsSync(file + suffix)) unlinkSync(file + suffix);
 });
 

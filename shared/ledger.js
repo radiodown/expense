@@ -6,9 +6,14 @@ export { categories };
 export const methods = ['신용카드', '체크카드', '계좌이체', '현금'];
 export const transactionTypes = { income: '수입', expense: '지출', saving: '저축', transfer: '이체' };
 export const categoryType = type => type === 'saving' ? 'expense' : type;
-export const refundLabel = type => type === 'saving' ? '취소·인출' : '취소·환급';
+export const refundLabel = (type, source) => type === 'saving' ? '취소·인출' : type === 'expense' && source?.type === '이체' ? '입금 (지출 차감)' : '취소·환급';
 export const transferCategory = { id: 'transfer', name: '이체', type: 'transfer', color: '#636366' };
-export const transactionLabel = t => t.type === 'transfer' ? `이체 ${t.transferDirection === 'in' ? '입금' : '출금'}` : transactionTypes[t.type];
+export const transactionLabel = t => t.type === 'transfer' ? `이체 ${t.transferDirection === 'in' ? '입금' : '출금'}` : t.type === 'expense' && t.importSource?.type === '이체' ? `이체 ${t.isRefund ? '입금' : '출금'}` : transactionTypes[t.type];
+export function normalizeTransfer(t) {
+  if (t.type !== 'transfer') return t;
+  return { ...t, type: 'expense', category: 'other', isRefund: t.transferDirection === 'in', transferDirection: null, fixedExpenseId: null,
+    importSource: t.importSource ? { ...t.importSource, type: '이체' } : null };
+}
 export const fallbackCategory = type => type === 'income' ? 'income-other' : 'other';
 const categoryIdSchema = z.string().regex(/^[a-zA-Z0-9-]{1,64}$/);
 export const categorySchema = z.object({
@@ -41,6 +46,7 @@ const transactionFields = z.object({
   transferDirection: z.enum(['in', 'out']).nullable().default(null),
   importKey: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
   importSource: z.object({
+    type: z.enum(['수입', '지출', '이체']).optional(),
     fileName: z.string().max(255), sheet: z.literal(2), row: z.number().int().min(1),
     category: z.string().max(100), subcategory: z.string().max(100),
     time: z.string().max(30), originalAmount: z.number().finite(),
@@ -108,7 +114,7 @@ export const backupSchema = z.union([
     if (!f || t.isRefund || t.type !== 'expense' || !t.date.startsWith(f.month) || linked.has(f.id)) invalid('고정지출 연결이 올바르지 않습니다.');
     linked.add(t.fixedExpenseId);
   }
-});
+}).transform(v => ({ ...v, transactions: v.transactions.map(normalizeTransfer) }));
 export const fixedDate = item => `${item.month}-${String(Math.min(item.day, getDaysInMonth(parseISO(`${item.month}-01`)))).padStart(2, '0')}`;
 export function budgetSummary(data, month) {
   const actual = summary(data.transactions, month);
@@ -126,9 +132,10 @@ export const transactionValue = t => t.type === 'transfer' ? (t.transferDirectio
 export const cashValue = t => (t.type === 'expense' || t.type === 'saving' ? -1 : 1) * transactionValue(t);
 export const categoryOf = (id, list = categories) => id === 'transfer' ? transferCategory : list.find(c => c.id === id) || { id, name: '미분류', color: '#8e8e93' };
 export function transferSummary(items) {
-  const transfers = items.filter(t => t.type === 'transfer');
-  const incoming = transfers.filter(t => t.transferDirection === 'in').reduce((sum, t) => sum + t.amount, 0);
-  const outgoing = transfers.filter(t => t.transferDirection === 'out').reduce((sum, t) => sum + t.amount, 0);
+  const transfers = items.filter(t => t.type === 'transfer' || (t.type === 'expense' && t.importSource?.type === '이체'));
+  const isIncoming = t => t.type === 'transfer' ? t.transferDirection === 'in' : t.isRefund;
+  const incoming = transfers.filter(isIncoming).reduce((sum, t) => sum + t.amount, 0);
+  const outgoing = transfers.filter(t => !isIncoming(t)).reduce((sum, t) => sum + t.amount, 0);
   return { incoming, outgoing, balance: incoming - outgoing, count: transfers.length };
 }
 export const shiftMonth = (month, delta) => format(subMonths(parseISO(`${month}-01`), -delta), 'yyyy-MM');

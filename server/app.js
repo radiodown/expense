@@ -6,7 +6,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { z } from 'zod';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { categories, categorySchema, categoryBudgetSchema, createTransactionSchema, createFixedExpenseSchema, fallbackCategory, monthSchema, budgetSchema, backupSchema, shiftMonth } from '../shared/ledger.js';
+import { categories, categorySchema, categoryBudgetSchema, createTransactionSchema, createFixedExpenseSchema, fallbackCategory, monthSchema, budgetSchema, backupSchema, shiftMonth, normalizeTransfer } from '../shared/ledger.js';
 import { legacyCategories } from '../shared/categories.js';
 import { parseXlsx, describeImport, MAX_XLSX_BYTES } from './xlsx-import.js';
 
@@ -68,6 +68,18 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
     } catch (error) { db.exec('ROLLBACK'); throw error; }
   }
   const categoryList = () => db.prepare('SELECT * FROM categories ORDER BY rowid').all();
+  const oldTransfers = db.prepare("SELECT * FROM transactions WHERE type='transfer'").all();
+  if (oldTransfers.length) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const update = db.prepare('UPDATE transactions SET type=?,category=?,isRefund=?,transferDirection=NULL,fixedExpenseId=NULL,importSource=? WHERE id=?');
+      for (const row of oldTransfers) {
+        const t = normalizeTransfer({ ...row, importSource: row.importSource ? JSON.parse(row.importSource) : null });
+        update.run(t.type, t.category, t.isRefund ? 1 : 0, t.importSource ? JSON.stringify(t.importSource) : null, t.id);
+      }
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); db.close(); throw error; }
+  }
   const categoryBudgetState = () => {
     const result = {};
     for (const b of db.prepare('SELECT * FROM category_budgets').all()) (result[b.month] ||= {})[b.category] = b.amount;
@@ -213,23 +225,26 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
         if (exists.get(t.importKey)) { duplicates++; continue; }
         put(randomUUID(), t);
         imported++;
-        if (t.type === 'income') income++; else if (t.type === 'expense') expense++; else transfer++;
+        if (t.type === 'income') income++; else if (t.type === 'expense') expense++;
+        if (t.importSource?.type === '이체') transfer++;
       }
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     res.json({ imported, duplicates, income, expense, transfer, months: [...selected].sort(), excluded: preview.parsed.skipped.filter(r => selected.has(r.month)).length });
   });
   app.post('/api/transactions', (req, res) => {
-    const t = parse(createTransactionSchema(categoryList()), req.body, res);
-    if (!t) return;
+    const parsed = parse(createTransactionSchema(categoryList()), req.body, res);
+    if (!parsed) return;
+    const t = normalizeTransfer(parsed);
     const id = randomUUID();
     if (!validateLink(t, id, res)) return;
     put(id, t);
     res.status(201).json({ id, ...t });
   });
   app.put('/api/transactions/:id', (req, res) => {
-    const t = parse(createTransactionSchema(categoryList()), req.body, res);
-    if (!t) return;
+    const parsed = parse(createTransactionSchema(categoryList()), req.body, res);
+    if (!parsed) return;
+    const t = normalizeTransfer(parsed);
     if (!validateLink(t, req.params.id, res)) return;
     const result = db.prepare('UPDATE transactions SET type=?,amount=?,date=?,title=?,category=?,method=?,note=?,fixedExpenseId=?,isRefund=?,importKey=?,importSource=?,transferDirection=? WHERE id=?')
       .run(t.type, t.amount, t.date, t.title, t.category, t.method, t.note, t.fixedExpenseId, t.isRefund ? 1 : 0, t.importKey, t.importSource ? JSON.stringify(t.importSource) : null, t.transferDirection, req.params.id);

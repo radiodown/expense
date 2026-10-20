@@ -18,7 +18,6 @@ function timeText(value) {
   return text(value);
 }
 function categoryFor(type, major, minor) {
-  if (type === 'transfer') return 'transfer';
   const available = categories.filter(c => c.type === type);
   const matching = available.find(c => c.name === major) || available.find(c => c.name === minor);
   if (matching) return matching.id;
@@ -58,7 +57,7 @@ export function parseLedgerRows(rows, fileName) {
     if (!Number.isSafeInteger(amount)) { skip('금액 오류'); continue; }
     if (amount === 0) { skip('0원'); continue; }
     if (text(get('화폐')).toUpperCase() !== 'KRW') { skip('원화가 아닌 통화'); continue; }
-    const type = sourceType === '수입' ? 'income' : sourceType === '지출' ? 'expense' : 'transfer';
+    const type = sourceType === '수입' ? 'income' : 'expense';
     const major = text(get('대분류')), minor = text(get('소분류'));
     const title = text(get('내용')), method = text(get('결제수단')) || '미지정', note = text(get('메모')), time = timeText(get('시간'));
     // File names and sheet row numbers are excluded so renamed/overlapping exports deduplicate.
@@ -68,9 +67,9 @@ export function parseLedgerRows(rows, fileName) {
     const importKey = createHash('sha256').update(`${identity}\n${index}`).digest('hex');
     const candidate = {
       type, date, title, amount: Math.abs(amount), method, note, category: categoryFor(type, major, minor),
-      isRefund: type === 'transfer' ? false : type === 'expense' ? amount > 0 : amount < 0, importKey,
-      transferDirection: type === 'transfer' ? amount > 0 ? 'in' : 'out' : null,
-      importSource: { fileName, sheet: 2, row, category: major, subcategory: minor, time, originalAmount: amount },
+      isRefund: type === 'expense' ? amount > 0 : amount < 0, importKey,
+      transferDirection: null,
+      importSource: { ...(sourceType === '이체' ? { type: sourceType } : {}), fileName, sheet: 2, row, category: major, subcategory: minor, time, originalAmount: amount },
     };
     const parsed = transactionSchema.safeParse(candidate);
     if (!parsed.success) { skip('날짜·내용·금액 또는 텍스트 길이 오류'); continue; }
@@ -102,7 +101,7 @@ export function describeImport(parsed, existingKeys) {
       transferCount: transfers.count, transferIn: transfers.incoming, transferOut: transfers.outgoing,
       income: available.filter(r => r.transaction.type === 'income').reduce((s, r) => s + transactionValue(r.transaction), 0),
       expense: available.filter(r => r.transaction.type === 'expense').reduce((s, r) => s + transactionValue(r.transaction), 0),
-      refunds: available.filter(r => r.transaction.isRefund).length,
+      refunds: available.filter(r => r.transaction.isRefund && r.transaction.importSource?.type !== '이체').length,
       skipped: parsed.skipped.filter(r => r.month === month).length,
     };
   });

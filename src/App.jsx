@@ -1,12 +1,14 @@
 import { useState, useRef, lazy, Suspense } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Icon, Modal, Empty, Metric, TransactionTable, InfiniteTransactionList, TransactionForm, FixedForm, BudgetForm } from './components.jsx';
+import { Icon, Modal, Empty, Metric, InfiniteTransactionList, TransactionForm, FixedForm, BudgetForm } from './components.jsx';
 import { sortTransactions } from './transaction-sort.js';
 import { ThemeSelector } from './Theme.jsx';
+import ExpenseHeatmap from './ExpenseHeatmap.jsx';
 import { categories as defaultCategories, transactionTypes, categoryType, fallbackCategory, today, currentMonth, monthLabel, shiftMonth, won, summary, trends, categoryTotals, categoryOf, makeDemo, backupSchema, budgetSummary, fixedDate, transactionValue } from '../shared/ledger.js';
 
 const FlowChart = lazy(() => import('./Charts.jsx'));
+const CategoryExpenseChart = lazy(() => import('./Charts.jsx').then(m => ({ default: m.CategoryExpenseChart })));
 const ImportPanel = lazy(() => import('./ImportPanel.jsx'));
 const CategoryManager = lazy(() => import('./ManagementPanels.jsx').then(m => ({ default: m.CategoryManager })));
 const CategoryBudgets = lazy(() => import('./ManagementPanels.jsx').then(m => ({ default: m.CategoryBudgets })));
@@ -17,13 +19,13 @@ const nav = [
 ];
 const shortLabels = { overview: '요약', income: '수입', expense: '지출', saving: '저축', budget: '예산', analytics: '분석', settings: '설정' };
 const descriptions = {
-  overview: '월별 수입·지출과 예산 집행 현황을 확인합니다.',
+  overview: '날짜별 지출 패턴과 월별 수입·지출·저축 흐름을 확인합니다.',
   income: '수입 내역을 등록하고 입금 항목별로 조회합니다.',
   expense: '실제 지출 내역을 등록하고 일반 지출과 고정지출을 구분합니다.',
   saving: '저축 내역을 따로 관리합니다. 저축은 지출 합계와 예산 사용액에서 제외됩니다.',
   budget: '총예산과 카테고리별 한도, 고정지출 지급 현황을 관리합니다.',
   analytics: '최근 6개월 수입·지출·저축과 카테고리별 지출을 비교합니다.',
-  settings: '카테고리 편집, 엑셀 가져오기 및 전체 데이터 백업을 관리합니다.',
+  settings: '화면 모드와 카테고리를 설정하고 엑셀 가져오기 및 백업을 관리합니다.',
 };
 async function api(path, method = 'GET', body) {
   const response = await fetch(`/api${path}`, { method, headers: body === undefined ? {} : { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -175,13 +177,12 @@ export default function App() {
       <nav aria-label="주 메뉴">{nav.map(([id, label, icon]) => <button key={id} aria-label={label} aria-current={view === id ? 'page' : undefined} className={`nav-item ${view === id ? 'selected' : ''}`} onClick={() => navigate(id)}><Icon name={icon} size={20} /><span className="nav-label">{label}</span><span className="nav-label-short" aria-hidden="true">{shortLabels[id]}</span></button>)}</nav>
       <div className="sidebar-status">이 기기에 저장됨</div>
     </aside>
-    <main><header className="page-heading"><div><h1>{nav.find(n => n[0] === view)?.[1]}</h1><p>{descriptions[view]}</p></div><div className="toolbar">
+    <main><header className="page-heading"><div><h1>{nav.find(n => n[0] === view)?.[1]}</h1><p>{descriptions[view]}</p></div>{(isLedger || view === 'budget') && <div className="toolbar">
       {view === 'income' && <button className="button primary" onClick={() => setEntry({ type: 'income' })}><Icon name="Plus" />수입 등록</button>}
       {view === 'expense' && <button className="button primary" onClick={() => setEntry({ type: 'expense' })}><Icon name="Plus" />지출 등록</button>}
       {view === 'saving' && <button className="button primary" onClick={() => setEntry({ type: 'saving' })}><Icon name="Plus" />저축 등록</button>}
       {view === 'budget' && <button className="button primary" onClick={() => setFixedEntry({})}><Icon name="Plus" />고정지출 추가</button>}
-      <ThemeSelector />
-    </div></header>
+    </div>}</header>
     {demo && <div className="notice"><span><strong>데모 모드</strong> · 예시 데이터입니다. 변경사항은 실제 가계부에 저장되지 않습니다.</span><button className="link-button" onClick={toggleDemo}>데모 종료</button></div>}
     {!demo && query.isPending ? <div className="loading" role="status">데이터를 불러오는 중…</div> : !demo && query.isError ? <div className="error-panel" role="alert"><h2>서버에 연결할 수 없습니다.</h2><p>백엔드 서버 실행 상태를 확인하세요.</p><button className="button" onClick={() => query.refetch()}>다시 시도</button></div> : <>
       {view !== 'settings' && <div className="period-row"><div className="month-control"><span>조회 월</span><button className="icon-button" aria-label="이전 달" disabled={month === '1900-01'} onClick={() => changeMonth(shiftMonth(month, -1))}><Icon name="ChevronLeft" /></button><input aria-label="조회 월" type="month" min="1900-01" max="2100-12" value={month} onChange={e => changeMonth(e.target.value)} /><button className="icon-button" aria-label="다음 달" disabled={month === '2100-12'} onClick={() => changeMonth(shiftMonth(month, 1))}><Icon name="ChevronRight" /></button><button className="button subtle" onClick={() => changeMonth(currentMonth())}>이번 달</button></div>
@@ -189,16 +190,19 @@ export default function App() {
 
       {view === 'overview' && <>
         <div className="metrics five"><Metric title="수입 합계" value={won(s.income)} note={`${s.items.filter(t => t.type === 'income').length}건`} tone="positive" /><Metric title="지출 합계" value={won(s.expense)} note={`${s.items.filter(t => t.type === 'expense').length}건`} /><Metric title="저축 합계" value={won(s.saving)} note={`${s.items.filter(t => t.type === 'saving').length}건 · 지출 제외`} tone="saving" /><Metric title="월 수지" value={won(s.balance)} note="해당 월 수입 − 지출 − 저축" tone={s.balance < 0 ? 'negative' : ''} /><Metric title="예산 잔액" value={b.budget ? won(b.remaining) : '미설정'} note={b.budget ? `실제 지출 기준 · 사용률 ${budgetRatio.toFixed(1)}%` : '예산 메뉴에서 총예산을 설정하세요.'} tone={b.budget && b.remaining < 0 ? 'negative' : 'emphasis'} /></div>
-        <div className="overview-grid"><Panel title="예산 집행 현황" action={<button className="link-button" onClick={() => navigate('budget')}>예산 관리 →</button>}>
-          <div className="panel-body"><div className="progress-label"><span>실제 지출 / 총예산</span><strong>{b.budget ? `${won(s.expense)} / ${won(b.budget)}` : '예산 미설정'}</strong></div><div className="progress-track"><span className={budgetRatio > 100 ? 'over' : ''} style={{ width: `${Math.max(0, Math.min(budgetRatio, 100))}%` }} /></div>
-            <dl className="summary-list"><div><dt>고정지출 예정 합계</dt><dd>{won(b.planned)}</dd></div><div><dt>미지급 고정지출</dt><dd>{pendingFixed.length}건 / {won(b.pending)}</dd></div><div><dt>추가 사용 가능액</dt><dd className={b.budget && b.available < 0 ? 'danger-text' : ''}>{b.budget ? won(b.available) : '—'}</dd></div></dl>
-            <p className="help">추가 사용 가능액 = 총예산 − 실제 지출 − 미지급 고정지출 예정액</p></div>
-        </Panel><Panel title="미지급 고정지출" note="아직 실제 지출과 연결되지 않은 예정 항목" action={<span className="badge">{pendingFixed.length}건</span>}>
+        <Panel title="지출 잔디" note={`${monthLabel(shiftMonth(month, -11))} ~ ${monthLabel(month)} · 최근 12개월 일별 지출`}>
+          <ExpenseHeatmap key={month} transactions={data.transactions} month={month} />
+        </Panel>
+        <div className="overview-grid">
+          <Panel title="월별 수입·지출·저축 추이" note={`${monthLabel(flow[0].key)} ~ ${monthLabel(month)}`} action={<FlowLegend />}><Chart data={flow} /></Panel>
+          <Panel title="카테고리별 지출" note={`${monthLabel(flow[0].key)} ~ ${monthLabel(month)} · 최근 6개월`}>
+            <Suspense fallback={<div className="chart-box loading">차트 불러오는 중…</div>}><CategoryExpenseChart transactions={data.transactions} month={month} categories={categories} /></Suspense>
+          </Panel>
+        </div>
+        <Panel title="미지급 고정지출" note="아직 실제 지출과 연결되지 않은 예정 항목" action={<span className="badge">{pendingFixed.length}건</span>}>
           {pendingFixed.length ? <div className="table-scroll"><table><thead><tr><th>예정일</th><th>항목</th><th className="number">예정 금액</th><th>처리</th></tr></thead><tbody>{pendingFixed.slice(0, 5).map(f => <tr key={f.id}><td className={fixedDate(f) < today() ? 'danger-text nowrap' : 'nowrap'}>{fixedDate(f)}</td><td>{f.title}</td><td className="number nowrap">{won(f.amount)}</td><td><button className="table-button" onClick={() => recordFixed(f)}>지출 등록</button></td></tr>)}</tbody></table></div> : <Empty text="미지급 고정지출이 없습니다." />}
           {pendingFixed.length > 5 && <button className="panel-footer-button" onClick={() => navigate('budget')}>미지급 {pendingFixed.length}건 전체 보기</button>}
-        </Panel></div>
-        <Panel title="최근 거래" note="선택한 달의 최근 8건" action={<div className="toolbar"><button className="link-button" onClick={() => navigate('income')}>수입 내역 →</button><button className="link-button" onClick={() => navigate('expense')}>지출 내역 →</button><button className="link-button" onClick={() => navigate('saving')}>저축 내역 →</button></div>}><TransactionTable items={sorted.slice(0, 8)} categories={categories} busy={busy} onEdit={setEntry} onDelete={item => save('delete', undefined, item.id)} onMakeFixed={item => save('makeFixed', undefined, item.id)} onMove={(item, type) => save('move', { type }, item.id)} /></Panel>
-        <div className="overview-grid"><Panel title="월별 수입·지출·저축 추이" action={<FlowLegend />}><Chart data={flow} /></Panel><Panel title="카테고리별 지출" note="실제 지출 기준">{cats.length ? <div className="table-scroll"><table><thead><tr><th>카테고리</th><th className="number">지출</th><th className="number">비중</th></tr></thead><tbody>{cats.map(c => <tr key={c.id}><td>{c.name}</td><td className="number">{won(c.value)}</td><td className="number">{categoryShare(c.value)}</td></tr>)}</tbody></table></div> : <Empty />}</Panel></div>
+        </Panel>
       </>}
 
       {isLedger && <>
@@ -236,6 +240,7 @@ export default function App() {
       </>}
 
       {view === 'settings' && <>
+        <Panel title="화면 설정"><div className="setting-row panel-body"><div><h3>화면 모드</h3><p>라이트·다크 모드를 선택하거나 시스템 설정을 따릅니다.</p></div><ThemeSelector /></div></Panel>
         <Suspense fallback={<div className="loading">카테고리 불러오는 중…</div>}><CategoryManager categories={categories} transactions={data.transactions} busy={busy} onSave={(payload, id) => mutation.mutateAsync({ action: 'saveCategory', payload, id })} onDelete={item => save('deleteCategory', undefined, item.id)} /></Suspense>
         <Suspense fallback={<div className="loading">엑셀 가져오기 준비 중…</div>}><ImportPanel request={api} categories={categories} demo={!!demo} onImported={() => client.invalidateQueries({ queryKey: ['ledger'] })} /></Suspense>
         <Panel title="데이터 저장 및 백업"><div className="panel-body"><p>기록은 이 컴퓨터의 <code>data/ledger.sqlite</code>에 저장됩니다. Windows와 Mac 간 이동 시 JSON 백업을 이용하세요.</p><div className="storage-stats"><span>거래 <strong>{query.data?.transactions.length || 0}건</strong></span><span>고정지출 예정 항목 <strong>{query.data?.fixedExpenses?.length || 0}건</strong></span></div>

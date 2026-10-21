@@ -9,17 +9,20 @@ import { categories as defaultCategories, transactionTypes, categoryType, fallba
 
 const FlowChart = lazy(() => import('./Charts.jsx'));
 const CategoryExpenseChart = lazy(() => import('./Charts.jsx').then(m => ({ default: m.CategoryExpenseChart })));
+const AssetsPanel = lazy(() => import('./AssetsPanel.jsx'));
+const AssetForm = lazy(() => import('./AssetsPanel.jsx').then(m => ({ default: m.AssetForm })));
 const ImportPanel = lazy(() => import('./ImportPanel.jsx'));
 const CategoryManager = lazy(() => import('./ManagementPanels.jsx').then(m => ({ default: m.CategoryManager })));
 const CategoryBudgets = lazy(() => import('./ManagementPanels.jsx').then(m => ({ default: m.CategoryBudgets })));
 const nav = [
   ['overview', '대시보드', 'LayoutDashboard'], ['income', '수입 내역', 'ArrowDownLeft'],
   ['expense', '지출 내역', 'ArrowUpRight'], ['saving', '저축 내역', 'PiggyBank'], ['budget', '예산 · 고정지출', 'Goal'],
-  ['analytics', '월별 분석', 'ChartNoAxesCombined'], ['settings', '데이터 관리', 'Settings2'],
+  ['analytics', '월별 분석', 'ChartNoAxesCombined'], ['assets', '자산 현황', 'Wallet'], ['settings', '데이터 관리', 'Settings2'],
 ];
-const shortLabels = { overview: '요약', income: '수입', expense: '지출', saving: '저축', budget: '예산', analytics: '분석', settings: '설정' };
+const shortLabels = { overview: '요약', assets: '자산', income: '수입', expense: '지출', saving: '저축', budget: '예산', analytics: '분석', settings: '설정' };
 const descriptions = {
   overview: '날짜별 지출 패턴과 월별 수입·지출·저축 흐름을 확인합니다.',
+  assets: '예금·적금·투자 자산과 대출을 현재 잔고로 관리합니다. 만기 예상액은 별도로 표시합니다.',
   income: '수입 내역을 등록하고 입금 항목별로 조회합니다.',
   expense: '실제 지출 내역을 등록하고 일반 지출과 고정지출을 구분합니다.',
   saving: '저축 내역을 따로 관리합니다. 저축은 지출 합계와 예산 사용액에서 제외됩니다.',
@@ -51,6 +54,7 @@ export default function App() {
   const [demo, setDemo] = useState(null);
   const [entry, setEntry] = useState(null);
   const [fixedEntry, setFixedEntry] = useState(null);
+  const [assetEntry, setAssetEntry] = useState(null);
   const [budgetOpen, setBudgetOpen] = useState(false);
   const [restore, setRestore] = useState(null);
   const [search, setSearch] = useState('');
@@ -105,6 +109,8 @@ export default function App() {
         if (action === 'makeFixed' && (!original || original.type !== 'expense' || original.isRefund || original.fixedExpenseId)) throw new Error('이미 연결되었거나 고정지출로 등록할 수 없는 내역입니다.');
         if (action === 'move' && (!original || !['expense', 'saving'].includes(payload.type) || original.type !== (payload.type === 'saving' ? 'expense' : 'saving'))) throw new Error('지출과 저축 내역 사이에서만 이동할 수 있습니다.');
         setDemo(d => {
+          if (action === 'saveAsset') return { ...d, assets: id ? d.assets.map(asset => asset.id === id ? { ...payload, id } : asset) : [{ ...payload, id: generatedId }, ...d.assets] };
+          if (action === 'deleteAsset') return { ...d, assets: d.assets.filter(asset => asset.id !== id) };
           if (action === 'save') return { ...d, transactions: id ? d.transactions.map(t => t.id === id ? { ...payload, id } : t) : [{ ...payload, id: generatedId }, ...d.transactions] };
           if (action === 'delete') return { ...d, transactions: d.transactions.filter(t => t.id !== id) };
           if (action === 'move') return { ...d, transactions: d.transactions.map(t => t.id === id ? { ...t, type: payload.type, fixedExpenseId: null } : t) };
@@ -133,6 +139,8 @@ export default function App() {
         return;
       }
       if (action === 'save') return api(`/transactions${id ? `/${id}` : ''}`, id ? 'PUT' : 'POST', payload);
+      if (action === 'saveAsset') return api(`/assets${id ? `/${id}` : ''}`, id ? 'PUT' : 'POST', payload);
+      if (action === 'deleteAsset') return api(`/assets/${id}`, 'DELETE');
       if (action === 'delete') return api(`/transactions/${id}`, 'DELETE');
       if (action === 'move') return api(`/transactions/${id}/move`, 'POST', payload);
       if (action === 'budget') return api(`/budgets/${targetMonth}`, 'PUT', payload);
@@ -147,7 +155,7 @@ export default function App() {
     },
     onSuccess: async (_result, { action, payload }) => {
       await client.invalidateQueries({ queryKey: ['ledger'] });
-      setEntry(null); setFixedEntry(null); setBudgetOpen(false); setRestore(null);
+      setEntry(null); setFixedEntry(null); setAssetEntry(null); setBudgetOpen(false); setRestore(null);
       if (action === 'deleteCategory') setCategory('all');
       toast.success(demo ? '데모 데이터에 반영했습니다.' : action === 'move' ? payload.type === 'saving' ? '저축으로 이동했습니다.' : '지출로 되돌렸습니다.' : action === 'makeFixed' ? '고정지출로 등록하고 기존 지출을 지급 완료로 연결했습니다.' : action.startsWith('delete') ? '삭제했습니다.' : '변경사항을 저장했습니다.');
     },
@@ -177,7 +185,8 @@ export default function App() {
       <nav aria-label="주 메뉴">{nav.map(([id, label, icon]) => <button key={id} aria-label={label} aria-current={view === id ? 'page' : undefined} className={`nav-item ${view === id ? 'selected' : ''}`} onClick={() => navigate(id)}><Icon name={icon} size={20} /><span className="nav-label">{label}</span><span className="nav-label-short" aria-hidden="true">{shortLabels[id]}</span></button>)}</nav>
       <div className="sidebar-status">이 기기에 저장됨</div>
     </aside>
-    <main><header className="page-heading"><div><h1>{nav.find(n => n[0] === view)?.[1]}</h1><p>{descriptions[view]}</p></div>{(isLedger || view === 'budget') && <div className="toolbar">
+    <main><header className="page-heading"><div><h1>{nav.find(n => n[0] === view)?.[1]}</h1><p>{descriptions[view]}</p></div>{(isLedger || view === 'budget' || view === 'assets') && <div className="toolbar">
+      {view === 'assets' && <button className="button primary" onClick={() => setAssetEntry({})}><Icon name="Plus" />자산·대출 등록</button>}
       {view === 'income' && <button className="button primary" onClick={() => setEntry({ type: 'income' })}><Icon name="Plus" />수입 등록</button>}
       {view === 'expense' && <button className="button primary" onClick={() => setEntry({ type: 'expense' })}><Icon name="Plus" />지출 등록</button>}
       {view === 'saving' && <button className="button primary" onClick={() => setEntry({ type: 'saving' })}><Icon name="Plus" />저축 등록</button>}
@@ -185,8 +194,10 @@ export default function App() {
     </div>}</header>
     {demo && <div className="notice"><span><strong>데모 모드</strong> · 예시 데이터입니다. 변경사항은 실제 가계부에 저장되지 않습니다.</span><button className="link-button" onClick={toggleDemo}>데모 종료</button></div>}
     {!demo && query.isPending ? <div className="loading" role="status">데이터를 불러오는 중…</div> : !demo && query.isError ? <div className="error-panel" role="alert"><h2>서버에 연결할 수 없습니다.</h2><p>백엔드 서버 실행 상태를 확인하세요.</p><button className="button" onClick={() => query.refetch()}>다시 시도</button></div> : <>
-      {view !== 'settings' && <div className="period-row"><div className="month-control"><span>조회 월</span><button className="icon-button" aria-label="이전 달" disabled={month === '1900-01'} onClick={() => changeMonth(shiftMonth(month, -1))}><Icon name="ChevronLeft" /></button><input aria-label="조회 월" type="month" min="1900-01" max="2100-12" value={month} onChange={e => changeMonth(e.target.value)} /><button className="icon-button" aria-label="다음 달" disabled={month === '2100-12'} onClick={() => changeMonth(shiftMonth(month, 1))}><Icon name="ChevronRight" /></button><button className="button subtle" onClick={() => changeMonth(currentMonth())}>이번 달</button></div>
+      {!['settings', 'assets'].includes(view) && <div className="period-row"><div className="month-control"><span>조회 월</span><button className="icon-button" aria-label="이전 달" disabled={month === '1900-01'} onClick={() => changeMonth(shiftMonth(month, -1))}><Icon name="ChevronLeft" /></button><input aria-label="조회 월" type="month" min="1900-01" max="2100-12" value={month} onChange={e => changeMonth(e.target.value)} /><button className="icon-button" aria-label="다음 달" disabled={month === '2100-12'} onClick={() => changeMonth(shiftMonth(month, 1))}><Icon name="ChevronRight" /></button><button className="button subtle" onClick={() => changeMonth(currentMonth())}>이번 달</button></div>
         {view === 'budget' && budgetAction}</div>}
+
+      {view === 'assets' && <Suspense fallback={<div className="loading">자산 현황 불러오는 중…</div>}><AssetsPanel assets={data.assets || []} busy={busy} onEdit={setAssetEntry} onDelete={asset => save('deleteAsset', undefined, asset.id)} /></Suspense>}
 
       {view === 'overview' && <>
         <div className="metrics five"><Metric title="수입 합계" value={won(s.income)} note={`${s.items.filter(t => t.type === 'income').length}건`} tone="positive" /><Metric title="지출 합계" value={won(s.expense)} note={`${s.items.filter(t => t.type === 'expense').length}건`} /><Metric title="저축 합계" value={won(s.saving)} note={`${s.items.filter(t => t.type === 'saving').length}건 · 지출 제외`} tone="saving" /><Metric title="월 수지" value={won(s.balance)} note="해당 월 수입 − 지출 − 저축" tone={s.balance < 0 ? 'negative' : ''} /><Metric title="예산 잔액" value={b.budget ? won(b.remaining) : '미설정'} note={b.budget ? `실제 지출 기준 · 사용률 ${budgetRatio.toFixed(1)}%` : '예산 메뉴에서 총예산을 설정하세요.'} tone={b.budget && b.remaining < 0 ? 'negative' : 'emphasis'} /></div>
@@ -243,11 +254,11 @@ export default function App() {
         <Panel title="화면 설정"><div className="setting-row panel-body"><div><h3>화면 모드</h3><p>라이트·다크 모드를 선택하거나 시스템 설정을 따릅니다.</p></div><ThemeSelector /></div></Panel>
         <Suspense fallback={<div className="loading">카테고리 불러오는 중…</div>}><CategoryManager categories={categories} transactions={data.transactions} busy={busy} onSave={(payload, id) => mutation.mutateAsync({ action: 'saveCategory', payload, id })} onDelete={item => save('deleteCategory', undefined, item.id)} /></Suspense>
         <Suspense fallback={<div className="loading">엑셀 가져오기 준비 중…</div>}><ImportPanel request={api} categories={categories} demo={!!demo} onImported={() => client.invalidateQueries({ queryKey: ['ledger'] })} /></Suspense>
-        <Panel title="데이터 저장 및 백업"><div className="panel-body"><p>기록은 이 컴퓨터의 <code>data/ledger.sqlite</code>에 저장됩니다. Windows와 Mac 간 이동 시 JSON 백업을 이용하세요.</p><div className="storage-stats"><span>거래 <strong>{query.data?.transactions.length || 0}건</strong></span><span>고정지출 예정 항목 <strong>{query.data?.fixedExpenses?.length || 0}건</strong></span></div>
-          <div className="setting-row"><div><h3>전체 백업</h3><p>모든 거래, 카테고리, 월별·카테고리별 예산, 고정지출 항목과 연결 정보를 포함합니다.</p></div><button className="button" disabled={!!demo} onClick={exportBackup}><Icon name="Download" />JSON 백업</button></div>
-          <div className="setting-row"><div><h3>백업 복원</h3><p>현재 전체 데이터를 백업 내용으로 교체합니다. 이전 버전 백업도 지원합니다.</p></div><button className="button" disabled={!!demo} onClick={() => fileInput.current.click()}>백업 파일 선택</button><input hidden ref={fileInput} type="file" accept=".json,application/json" onChange={chooseBackup} /></div>{demo && <p className="help">백업과 복원은 데모 종료 후 사용할 수 있습니다.</p>}
+        <Panel title="데이터 저장 및 백업"><div className="panel-body"><p>기록은 이 컴퓨터의 <code>data/ledger.sqlite</code>에 저장됩니다. Windows와 Mac 간 이동 시 JSON 백업을 이용하세요.</p><div className="storage-stats"><span>거래 <strong>{query.data?.transactions.length || 0}건</strong></span><span>고정지출 예정 항목 <strong>{query.data?.fixedExpenses?.length || 0}건</strong></span><span>자산·대출 <strong>{query.data?.assets?.length || 0}개</strong></span></div>
+          <div className="setting-row"><div><h3>전체 백업</h3><p>모든 거래, 자산·대출과 상품 정책, 카테고리, 예산, 고정지출 항목과 연결 정보를 포함합니다.</p></div><button className="button" disabled={!!demo} onClick={exportBackup}><Icon name="Download" />JSON 백업</button></div>
+          <div className="setting-row"><div><h3>백업 복원</h3><p>현재 전체 데이터를 백업 내용으로 교체합니다. 자산이 없는 예전 백업을 복원하면 자산 목록도 비워집니다.</p></div><button className="button" disabled={!!demo} onClick={() => fileInput.current.click()}>백업 파일 선택</button><input hidden ref={fileInput} type="file" accept=".json,application/json" onChange={chooseBackup} /></div>{demo && <p className="help">백업과 복원은 데모 종료 후 사용할 수 있습니다.</p>}
         </div></Panel>
-        <Panel title="데모 데이터"><div className="setting-row panel-body"><p>실제 데이터를 변경하지 않고 수입·지출·저축, 예산 및 고정지출 기능을 확인합니다.</p><button className="button" onClick={() => { toggleDemo(); navigate('overview'); }}>{demo ? '데모 종료' : '데모 시작'}</button></div></Panel>
+        <Panel title="데모 데이터"><div className="setting-row panel-body"><p>실제 데이터를 변경하지 않고 수입·지출·저축, 자산·대출, 예산 및 고정지출 기능을 확인합니다.</p><button className="button" onClick={() => { toggleDemo(); navigate('overview'); }}>{demo ? '데모 종료' : '데모 시작'}</button></div></Panel>
       </>}
     </>}
     <footer>로컬 저장 · 수입·지출·저축 별도 집계 · 지출에 이체 포함 <span>금액 단위: 원 (KRW)</span></footer>
@@ -255,8 +266,9 @@ export default function App() {
     <Modal open={!!entry} onClose={() => setEntry(null)} busy={busy} title={`${transactionTypes[entry?.type] || '거래'} ${entry?.id ? '수정' : '등록'}`} description={demo ? '데모 데이터에만 반영됩니다.' : entry?.type === 'saving' ? '저축 날짜, 금액과 계좌를 입력하세요.' : '실제 입금 또는 지출 내역을 입력하세요.'}>{entry && <TransactionForm entry={entry} month={month} categories={categories} fixedExpenses={fixedExpenses} transactions={data.transactions} busy={busy} onSave={(payload, id) => save('save', payload, id)} />}</Modal>
     <Modal open={fixedEntry !== null} onClose={() => setFixedEntry(null)} busy={busy} title={`고정지출 ${fixedEntry?.id ? '수정' : '추가'}`} description={`${monthLabel(month)} 지출 계획`}>{fixedEntry !== null && <FixedForm item={fixedEntry.id ? fixedEntry : null} month={month} categories={categories} busy={busy} onSave={(payload, id) => save('saveFixed', payload, id)} />}</Modal>
     <Modal open={budgetOpen} onClose={() => setBudgetOpen(false)} busy={busy} title="월 총예산 설정" description={monthLabel(month)}>{budgetOpen && <BudgetForm amount={b.budget} planned={b.planned} busy={busy} onSave={amount => save('budget', { amount })} />}</Modal>
-    <Modal open={!!restore} onClose={() => setRestore(null)} busy={busy} title="전체 데이터를 복원할까요?" description="현재 거래, 예산 및 고정지출 항목 전체가 교체됩니다. 필요한 데이터는 먼저 백업하세요.">
-      <p>거래 {restore?.transactions.length}건 · 월별 예산 {Object.keys(restore?.budgets || {}).length}개 · 고정지출 {restore?.fixedExpenses.length}개</p><div className="modal-actions"><button className="button" disabled={busy} onClick={() => setRestore(null)}>취소</button><button className="button danger" disabled={busy} onClick={() => save('restore', restore)}>교체하고 복원</button></div>
+    <Modal open={assetEntry !== null} onClose={() => setAssetEntry(null)} busy={busy} className="asset-modal" title={`자산·대출 ${assetEntry?.id ? '수정' : '등록'}`} description={demo ? '데모 데이터에만 반영됩니다.' : '현재 잔고를 입력하세요. 만기 예상액은 현재 자산에 합산하지 않습니다.'}>{assetEntry !== null && <Suspense fallback={<div className="loading">입력 화면 불러오는 중…</div>}><AssetForm entry={assetEntry} busy={busy} onCancel={() => setAssetEntry(null)} onSave={(payload, id) => mutation.mutateAsync({ action: 'saveAsset', payload, id })} /></Suspense>}</Modal>
+    <Modal open={!!restore} onClose={() => setRestore(null)} busy={busy} title="전체 데이터를 복원할까요?" description="현재 거래, 자산, 예산 및 고정지출 항목 전체가 교체됩니다. 자산이 없는 예전 백업을 복원하면 자산 목록도 비워집니다. 필요한 데이터는 먼저 백업하세요.">
+      <p>거래 {restore?.transactions.length}건 · 자산·대출 {restore?.assets.length}개 · 월별 예산 {Object.keys(restore?.budgets || {}).length}개 · 고정지출 {restore?.fixedExpenses.length}개</p><div className="modal-actions"><button className="button" disabled={busy} onClick={() => setRestore(null)}>취소</button><button className="button danger" disabled={busy} onClick={() => save('restore', restore)}>교체하고 복원</button></div>
     </Modal>
   </div>;
 }

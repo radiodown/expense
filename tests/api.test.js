@@ -11,6 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { categories, summary, budgetSummary } from '../shared/ledger.js';
 
 const sample = { type: 'expense', amount: 12000, date: '2026-10-20', title: '점심', category: 'food', method: '체크카드', note: '기록' };
+const assetSample = { name: 'Term deposit', kind: 'deposit', accountType: 'general', balance: 1000000, asOf: '2026-10-20', policy: { taxMode: 'custom', taxRate: 9.9, taxFreeAllowance: 10000, grant: 5000, name: 'Product benefit', conditions: 'Hold until maturity', sourceUrl: 'https://example.com/product', checkedOn: '2026-10-20' }, maturity: { mode: 'calculated', startDate: '2026-10-20', months: 12, principal: 1000000, annualRate: 3 } };
 async function setup(t, dbPath = ':memory:') {
   const { app, db } = createApp(dbPath);
   const server = app.listen(0, '127.0.0.1');
@@ -42,7 +43,7 @@ async function setup(t, dbPath = ':memory:') {
 }
 test('API creates, updates, lists and deletes real SQLite records', async t => {
   const { request } = await setup(t);
-  assert.deepEqual((await request('/api/state')).body, { transactions: [], budgets: {}, fixedExpenses: [], categories, categoryBudgets: {} });
+  assert.deepEqual((await request('/api/state')).body, { transactions: [], budgets: {}, fixedExpenses: [], categories, categoryBudgets: {}, assets: [] });
   const created = await request('/api/transactions', 'POST', sample);
   assert.equal(created.status, 201);
   assert.equal(created.body.title, '점심');
@@ -54,6 +55,65 @@ test('API creates, updates, lists and deletes real SQLite records', async t => {
   assert.equal((await request(url, 'PUT', sample)).status, 404);
   assert.equal((await request('/api/state')).body.transactions.length, 0);
 });
+test('assets CRUD validates balances and policy data without changing transactions or budgets', async t => {
+  const { request } = await setup(t);
+  await request('/api/transactions', 'POST', sample);
+  const before = (await request('/api/state')).body;
+  for (const patch of [{ balance: -1 }, { balance: 1.5 }, { asOf: '2026-02-30' }, { policy: { taxRate: 101 } }, { policy: { sourceUrl: 'javascript:alert(1)' } }, { maturity: null }]) {
+    assert.equal((await request('/api/assets', 'POST', { ...assetSample, ...patch })).status, 400);
+  }
+  const created = await request('/api/assets', 'POST', assetSample);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.policy.grant, 5000);
+  const url = `/api/assets/${created.body.id}`;
+  const changed = await request(url, 'PUT', { ...created.body, balance: 1200000, accountType: 'irp', policy: { taxMode: 'deferred' } });
+  assert.equal(changed.status, 200);
+  const state = (await request('/api/state')).body;
+  assert.equal(state.assets[0].balance, 1200000);
+  assert.equal(state.assets[0].accountType, 'irp');
+  assert.deepEqual({ ...state, assets: [] }, before);
+  assert.equal((await request(url, 'DELETE')).status, 204);
+  assert.equal((await request(url, 'DELETE')).status, 404);
+  assert.equal((await request(url, 'PUT', assetSample)).status, 404);
+  assert.deepEqual((await request('/api/state')).body, before);
+});
+
+test('asset balances, account types and product policies survive a database restart', async t => {
+  const file = path.join(tmpdir(), `moa-assets-test-${randomUUID()}.sqlite`);
+  const first = await setup(t, file);
+  const created = (await first.request('/api/assets', 'POST', assetSample)).body;
+  await first.stop();
+  const second = await setup(t, file);
+  assert.deepEqual((await second.request('/api/state')).body.assets, [created]);
+  await second.stop();
+  for (const suffix of ['', '-wal', '-shm']) if (existsSync(file + suffix)) unlinkSync(file + suffix);
+});
+
+test('asset backup restores atomically, rejects corrupt assets and clears assets when restoring an old backup', async t => {
+  t.mock.method(console, 'error', () => {});
+  const { request, db } = await setup(t);
+  await request('/api/assets', 'POST', assetSample);
+  await request('/api/transactions', 'POST', sample);
+  const backup = (await request('/api/backup')).body;
+  assert.equal(backup.version, 6);
+  await request('/api/assets', 'POST', { name: 'Bitcoin', kind: 'bitcoin', accountType: 'general', balance: 250000, asOf: '2026-10-20' });
+  const before = (await request('/api/state')).body;
+  for (const patch of [{ assets: undefined }, { assets: [backup.assets[0], backup.assets[0]] }, { assets: [{ ...backup.assets[0], balance: -1 }] }]) {
+    assert.equal((await request('/api/restore', 'POST', { ...backup, ...patch })).status, 400);
+    assert.deepEqual((await request('/api/state')).body, before);
+  }
+  db.exec("CREATE TRIGGER fail_asset_restore BEFORE INSERT ON assets BEGIN SELECT RAISE(ABORT, 'test rollback'); END;");
+  assert.equal((await request('/api/restore', 'POST', backup)).status, 500);
+  assert.deepEqual((await request('/api/state')).body, before);
+  db.exec('DROP TRIGGER fail_asset_restore');
+  assert.equal((await request('/api/restore', 'POST', backup)).status, 200);
+  assert.deepEqual((await request('/api/state')).body.assets, backup.assets);
+  assert.equal((await request('/api/restore', 'POST', { ...backup, version: 5, assets: undefined })).status, 200);
+  const restored = (await request('/api/state')).body;
+  assert.deepEqual(restored.assets, []);
+  assert.equal(restored.transactions.length, 1);
+});
+
 test('invalid requests never add a transaction', async t => {
   const { request } = await setup(t);
   for (const patch of [{ amount: -1 }, { amount: 1.2 }, { date: '2026-02-30' }, { category: 'salary' }, { title: ' ' }]) {
@@ -160,7 +220,7 @@ test('current backup preserves payment links and rejects corrupt references; v1 
   const f = (await request('/api/fixed-expenses', 'POST', fixedSample)).body;
   await request('/api/transactions', 'POST', { ...sample, fixedExpenseId: f.id });
   const backup = (await request('/api/backup')).body;
-  assert.equal(backup.version, 5);
+  assert.equal(backup.version, 6);
   assert.equal((await request('/api/restore', 'POST', { ...backup, fixedExpenses: [] })).status, 400);
   assert.equal((await request('/api/restore', 'POST', { ...backup, fixedExpenses: undefined })).status, 400);
   assert.equal((await request('/api/restore', 'POST', { ...backup, transactions: [...backup.transactions, { ...backup.transactions[0], id: randomUUID() }] })).status, 400);
@@ -404,7 +464,7 @@ test('legacy transfer requests become expenses and retain their signed cash valu
     assert.equal((await request('/api/transactions', 'POST', { ...transfer, ...patch })).status, 400);
   }
   const backup = (await request('/api/backup')).body;
-  assert.equal(backup.version, 5);
+  assert.equal(backup.version, 6);
   assert.equal(backup.transactions[0].type, 'expense');
   assert.equal(backup.transactions[0].isRefund, true);
   assert.equal(backup.transactions[0].transferDirection, null);
@@ -506,7 +566,7 @@ test('moving expenses to savings preserves source data, avoids duplicates and ca
   assert.equal(summary(state.transactions, '2026-10').balance, summary(before.transactions, '2026-10').balance);
   assert.equal(budgetSummary(state, '2026-10').remaining, 100000);
   const backup = (await request('/api/backup')).body;
-  assert.equal(backup.version, 5);
+  assert.equal(backup.version, 6);
   assert.equal((await request('/api/restore', 'POST', { ...backup, version: 4 })).status, 400);
   assert.equal((await request('/api/restore', 'POST', backup)).status, 200);
   assert.equal((await request(moveUrl, 'POST', { type: 'expense' })).status, 200);

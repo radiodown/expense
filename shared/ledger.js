@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { format, subMonths, parseISO, getDaysInMonth } from 'date-fns';
 import { categories, legacyCategories } from './categories.js';
+import { storedAssetSchema, makeAssetDemo } from './assets.js';
 
 export { categories };
 export const methods = ['신용카드', '체크카드', '계좌이체', '현금'];
@@ -76,15 +77,20 @@ const backupFields = {
   budgets: z.record(monthSchema, z.number().int().min(0).max(999_999_999_999)),
 };
 const fixedBackup = z.array(fixedExpenseFields.extend({ id: z.string().uuid() })).max(100000);
+const modernBackupFields = {
+  ...backupFields, fixedExpenses: fixedBackup,
+  categories: z.array(storedCategorySchema).min(2).max(500),
+  categoryBudgets: z.record(monthSchema, z.record(categoryIdSchema, amountSchema)),
+};
+const legacyAssets = z.array(storedAssetSchema).max(0).default([]);
 export const backupSchema = z.union([
-  z.object({ version: z.literal(1), ...backupFields }).transform(v => ({ ...v, fixedExpenses: [], categories: legacyCategories, categoryBudgets: {} })),
-  z.object({ version: z.literal(2), ...backupFields, fixedExpenses: fixedBackup }).transform(v => ({ ...v, categories: legacyCategories, categoryBudgets: {} })),
-  z.object({ version: z.union([z.literal(3), z.literal(4), z.literal(5)]), ...backupFields, fixedExpenses: fixedBackup,
-    categories: z.array(storedCategorySchema).min(2).max(500),
-    categoryBudgets: z.record(monthSchema, z.record(categoryIdSchema, amountSchema)),
-  }),
+  z.object({ version: z.literal(1), ...backupFields, assets: legacyAssets }).transform(v => ({ ...v, fixedExpenses: [], categories: legacyCategories, categoryBudgets: {} })),
+  z.object({ version: z.literal(2), ...backupFields, fixedExpenses: fixedBackup, assets: legacyAssets }).transform(v => ({ ...v, categories: legacyCategories, categoryBudgets: {} })),
+  z.object({ version: z.union([z.literal(3), z.literal(4), z.literal(5)]), ...modernBackupFields, assets: legacyAssets }),
+  z.object({ version: z.literal(6), ...modernBackupFields, assets: z.array(storedAssetSchema).max(1000) }),
 ]).superRefine((v, ctx) => {
   const invalid = message => ctx.addIssue({ code: 'custom', message });
+  if (new Set(v.assets.map(asset => asset.id)).size !== v.assets.length) invalid('중복된 자산 ID가 있습니다.');
   const categoryMap = new Map(v.categories.map(c => [c.id, c]));
   if (categoryMap.has('transfer')) invalid('이체 전용 분류는 사용자 카테고리로 등록할 수 없습니다.');
   if (categoryMap.size !== v.categories.length) invalid('중복된 카테고리 ID가 있습니다.');
@@ -191,5 +197,5 @@ export function makeDemo(month) {
       add(m, day, 'expense', 4500 + (day % 3) * 1500, '오후의 커피', 'cafe');
     }
   }
-  return { transactions, budgets, fixedExpenses, categories: categories.map(c => ({ ...c })), categoryBudgets: {} };
+  return { transactions, budgets, fixedExpenses, categories: categories.map(c => ({ ...c })), categoryBudgets: {}, assets: makeAssetDemo(`${month}-20`) };
 }

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import { won, monthLabel } from '../shared/ledger.js';
 import { categoryExpenseTrends } from './dashboard-data.js';
 import { Empty } from './components.jsx';
@@ -36,14 +36,14 @@ export function CategoryExpenseChart({ transactions, month, categories }) {
   if (!series.length) return <Empty text="최근 6개월에 등록된 지출이 없습니다." />;
   return <div className="category-expense-chart">
     <div className="chart-box" role="group" aria-label={`최근 6개월 ${selected ? selected.name : '카테고리별'} 지출 비교`}>
-      <ResponsiveContainer width="100%" height="100%" minWidth={0}><BarChart data={months} stackOffset="sign" margin={{ top: 12, right: 15, left: 8, bottom: 0 }}>
+      <ResponsiveContainer width="100%" height="100%" minWidth={0}><LineChart data={months} margin={{ top: 12, right: 15, left: 8, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" />
         <XAxis dataKey="name" tick={{ fontSize: 13, fill: 'var(--muted)' }} tickLine={false} axisLine={false} />
         <YAxis width={65} tickFormatter={value => `${Number((value / 10000).toFixed(1))}만`} tick={{ fontSize: 12, fill: 'var(--muted)' }} tickLine={false} axisLine={false} />
         <Tooltip cursor={{ fill: 'var(--chart-cursor)' }} content={<CategoryTooltip />} />
         <ReferenceLine y={0} stroke="var(--border)" />
-        {visible.map(category => <Bar key={category.id} dataKey={category.dataKey} name={category.name} stackId="expense" fill={`var(--category-${category.colorIndex})`} maxBarSize={48} />)}
-      </BarChart></ResponsiveContainer>
+        {visible.map(category => <Line key={category.id} type="linear" dataKey={category.dataKey} name={category.name} stroke={`var(--category-${category.colorIndex})`} strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 5 }} />)}
+      </LineChart></ResponsiveContainer>
     </div>
     <div className="category-chart-legend" role="group" aria-label="비교할 지출 카테고리 선택">
       <button type="button" aria-pressed={!selected} onClick={() => setActive(null)}>전체</button>

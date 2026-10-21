@@ -45,7 +45,7 @@ test('demo records are valid, uniquely identified and separate from storage', ()
   assert.equal(Object.keys(demo.budgets).length, 6);
   assert.equal(new Set(demo.transactions.map(t => t.id)).size, demo.transactions.length);
   assert.ok(demo.transactions.every(t => transactionSchema.safeParse(t).success));
-  assert.ok(backupSchema.safeParse({ version: 5, ...demo }).success);
+  assert.ok(backupSchema.safeParse({ version: 6, ...demo }).success);
 });
 test('budget reserves unpaid plans and counts actual fixed payments only once', () => {
   const data = { budgets: { '2026-10': 1000 }, fixedExpenses: [
@@ -144,7 +144,7 @@ test('savings use expense classifications and require v5 backups without fixed-p
   for (const patch of [{ category: 'salary' }, { transferDirection: 'out' }, { fixedExpenseId: '00000000-0000-4000-8000-000000000002' }]) {
     assert.equal(transactionSchema.safeParse({ ...saving, ...patch }).success, false);
   }
-  const backup = { ...makeDemo('2026-10'), version: 5, transactions: [saving], fixedExpenses: [] };
+  const backup = { ...makeDemo('2026-10'), version: 5, transactions: [saving], fixedExpenses: [], assets: [] };
   assert.ok(backupSchema.safeParse(backup).success);
   assert.equal(backupSchema.safeParse({ ...backup, version: 4 }).success, false);
 });

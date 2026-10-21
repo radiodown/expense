@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { categories, categorySchema, categoryBudgetSchema, createTransactionSchema, createFixedExpenseSchema, fallbackCategory, monthSchema, budgetSchema, backupSchema, shiftMonth, normalizeTransfer } from '../shared/ledger.js';
 import { legacyCategories } from '../shared/categories.js';
+import { assetSchema } from '../shared/assets.js';
 import { parseXlsx, describeImport, MAX_XLSX_BYTES } from './xlsx-import.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -28,6 +29,7 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
     CREATE TABLE IF NOT EXISTS categories (id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, color TEXT NOT NULL, icon TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS category_budgets (month TEXT NOT NULL, category TEXT NOT NULL, amount INTEGER NOT NULL CHECK(amount >= 0), PRIMARY KEY(month, category));
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, data TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS fixed_expenses (
       id TEXT PRIMARY KEY, month TEXT NOT NULL, title TEXT NOT NULL, amount INTEGER NOT NULL CHECK(amount > 0),
       day INTEGER NOT NULL CHECK(day BETWEEN 1 AND 31), category TEXT NOT NULL, method TEXT NOT NULL, note TEXT NOT NULL
@@ -112,6 +114,7 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
     fixedExpenses: db.prepare('SELECT * FROM fixed_expenses ORDER BY month DESC, day, title').all(),
     categories: categoryList(),
     categoryBudgets: categoryBudgetState(),
+    assets: db.prepare('SELECT * FROM assets ORDER BY rowid DESC').all().map(asset => ({ ...JSON.parse(asset.data), id: asset.id })),
   });
   const insert = db.prepare('INSERT INTO transactions (id,type,amount,date,title,category,method,note,fixedExpenseId,isRefund,importKey,importSource,transferDirection) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
   const put = (id, t) => insert.run(id, t.type, t.amount, t.date, t.title, t.category, t.method, t.note, t.fixedExpenseId || null, t.isRefund ? 1 : 0, t.importKey || null, t.importSource ? JSON.stringify(t.importSource) : null, t.transferDirection || null);
@@ -134,6 +137,27 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
   };
   app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
   app.get('/api/state', (_req, res) => res.json(state()));
+  const putAsset = (id, asset) => db.prepare('INSERT INTO assets (id,data) VALUES (?,?)').run(id, JSON.stringify(asset));
+  app.post('/api/assets', (req, res) => {
+    const asset = parse(assetSchema, req.body, res);
+    if (!asset) return;
+    if (db.prepare('SELECT COUNT(*) AS count FROM assets').get().count >= 1000) return res.status(400).json({ error: '자산은 최대 1,000개까지 등록할 수 있습니다.' });
+    const id = randomUUID();
+    putAsset(id, asset);
+    res.status(201).json({ ...asset, id });
+  });
+  app.put('/api/assets/:id', (req, res) => {
+    const asset = parse(assetSchema, req.body, res);
+    if (!asset) return;
+    const result = db.prepare('UPDATE assets SET data=? WHERE id=?').run(JSON.stringify(asset), req.params.id);
+    if (!result.changes) return res.status(404).json({ error: '자산을 찾을 수 없습니다.' });
+    res.json({ ...asset, id: req.params.id });
+  });
+  app.delete('/api/assets/:id', (req, res) => {
+    const result = db.prepare('DELETE FROM assets WHERE id=?').run(req.params.id);
+    if (!result.changes) return res.status(404).json({ error: '자산을 찾을 수 없습니다.' });
+    res.status(204).end();
+  });
   const duplicateCategory = (c, id) => categoryList().some(item => item.id !== id && item.type === c.type && item.name.toLowerCase() === c.name.toLowerCase());
   app.post('/api/categories', (req, res) => {
     const c = parse(categorySchema, req.body, res);
@@ -306,7 +330,7 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
     res.json(b);
   });
   app.get('/api/backup', (_req, res) => {
-    res.attachment('moa-backup.json').json({ version: 5, exportedAt: new Date().toISOString(), ...state() });
+    res.attachment('moa-backup.json').json({ version: 6, exportedAt: new Date().toISOString(), ...state() });
   });
   app.post('/api/fixed-expenses', (req, res) => {
     const f = parse(createFixedExpenseSchema(categoryList()), req.body, res);
@@ -352,7 +376,8 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
     if (!backup) return;
     db.exec('BEGIN IMMEDIATE');
     try {
-      db.exec('DELETE FROM transactions; DELETE FROM budgets; DELETE FROM fixed_expenses; DELETE FROM categories; DELETE FROM category_budgets;');
+      db.exec('DELETE FROM transactions; DELETE FROM budgets; DELETE FROM fixed_expenses; DELETE FROM categories; DELETE FROM category_budgets; DELETE FROM assets;');
+      for (const asset of backup.assets) putAsset(asset.id, assetSchema.parse(asset));
       for (const c of backup.categories) putCategory(c.id, c);
       for (const [month, amounts] of Object.entries(backup.categoryBudgets)) {
         for (const [id, amount] of Object.entries(amounts)) db.prepare('INSERT INTO category_budgets VALUES (?,?,?)').run(month, id, amount);

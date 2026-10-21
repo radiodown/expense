@@ -1,19 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as ContextMenu from '@radix-ui/react-context-menu';
-import { LayoutDashboard, ArrowDownLeft, ArrowUpRight, ArrowLeftRight, ArrowUp, ArrowDown, ArrowUpDown, PiggyBank, ChartNoAxesCombined, Settings2, Plus, Pencil, Trash2, X, ChevronLeft, ChevronRight, Download, Search, Goal, Copy, Check, LoaderCircle, Database } from 'lucide-react';
+import { LayoutDashboard, Wallet, ArrowDownLeft, ArrowUpRight, ArrowLeftRight, ArrowUp, ArrowDown, ArrowUpDown, PiggyBank, ChartNoAxesCombined, Settings2, Plus, Pencil, Trash2, X, ChevronLeft, ChevronRight, Download, Search, Goal, Copy, Check, LoaderCircle, Database } from 'lucide-react';
 import { categories as defaultCategories, transferCategory, transactionTypes, transactionLabel, categoryType, refundLabel, methods, createTransactionSchema, createFixedExpenseSchema, today, currentMonth, categoryOf, won, cashValue } from '../shared/ledger.js';
 import InlineTransactionRow from './InlineTransactionRow.jsx';
 import { transactionColumns } from './transaction-sort.js';
 
-const icons = { LayoutDashboard, ArrowDownLeft, ArrowUpRight, ArrowLeftRight, ArrowUp, ArrowDown, ArrowUpDown, PiggyBank, ChartNoAxesCombined, Settings2, Plus, Pencil, Trash2, X, ChevronLeft, ChevronRight, Download, Search, Goal, Copy, Check, LoaderCircle, Database };
+const icons = { LayoutDashboard, Wallet, ArrowDownLeft, ArrowUpRight, ArrowLeftRight, ArrowUp, ArrowDown, ArrowUpDown, PiggyBank, ChartNoAxesCombined, Settings2, Plus, Pencil, Trash2, X, ChevronLeft, ChevronRight, Download, Search, Goal, Copy, Check, LoaderCircle, Database };
 export function Icon({ name, size = 18, ...props }) {
   const Component = icons[name] || Database;
   return <Component size={size} strokeWidth={1.8} {...props} />;
 }
-export function Modal({ open, onClose, title, description, children, busy }) {
+export function Modal({ open, onClose, title, description, children, busy, className = '' }) {
   return <Dialog.Root open={open} onOpenChange={v => { if (!v && !busy) onClose(); }}><Dialog.Portal>
-    <Dialog.Overlay className="modal-overlay" /><Dialog.Content className="modal">
+    <Dialog.Overlay className="modal-overlay" /><Dialog.Content className={`modal ${className}`}>
       <div className="modal-heading"><div><Dialog.Title>{title}</Dialog.Title><Dialog.Description>{description}</Dialog.Description></div><Dialog.Close className="icon-button" disabled={busy} aria-label="닫기"><Icon name="X" /></Dialog.Close></div>
       {children}
     </Dialog.Content>

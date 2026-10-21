@@ -572,10 +572,27 @@ test('moving expenses to savings preserves source data, avoids duplicates and ca
   assert.equal((await request(moveUrl, 'POST', { type: 'expense' })).status, 200);
   state = (await request('/api/state')).body;
   assert.deepEqual(state.transactions, before.transactions);
-  assert.equal((await request(moveUrl, 'POST', { type: 'income' })).status, 400);
+  assert.equal((await request(moveUrl, 'POST', { type: 'transfer' })).status, 400);
   assert.equal((await request('/api/transactions/missing/move', 'POST', { type: 'saving' })).status, 404);
   const income = (await request('/api/transactions', 'POST', { ...sample, type: 'income', category: 'salary' })).body;
   assert.equal((await request(`/api/transactions/${income.id}/move`, 'POST', { type: 'saving' })).status, 409);
+});
+
+test('misfiled expenses move to income with that side\'s fallback category and back', async t => {
+  const { request } = await setup(t);
+  const fixed = (await request('/api/fixed-expenses', 'POST', { month: '2026-10', title: '관리비', amount: 50000, day: 10, category: 'home', method: '계좌이체' })).body;
+  const expense = (await request('/api/transactions', 'POST', { ...sample, category: 'home', fixedExpenseId: fixed.id })).body;
+  const refund = (await request('/api/transactions', 'POST', { ...sample, isRefund: true })).body;
+  const moveUrl = id => `/api/transactions/${id}/move`;
+  assert.equal((await request(moveUrl(expense.id), 'POST', { type: 'income' })).status, 200);
+  assert.equal((await request(moveUrl(refund.id), 'POST', { type: 'income' })).status, 200);
+  let state = (await request('/api/state')).body;
+  for (const t of state.transactions) assert.deepEqual([t.type, t.category, t.isRefund, t.fixedExpenseId], ['income', 'income-other', false, null]);
+  assert.equal(summary(state.transactions, '2026-10').income, sample.amount * 2);
+  assert.equal((await request(moveUrl(expense.id), 'POST', { type: 'saving' })).status, 409);
+  assert.equal((await request(moveUrl(expense.id), 'POST', { type: 'expense' })).status, 200);
+  state = (await request('/api/state')).body;
+  assert.deepEqual(state.transactions.find(t => t.id === expense.id).category, 'other');
 });
 
 test('savings support CRUD, refund amounts and category deletion without fixed-plan classification', async t => {
@@ -727,4 +744,31 @@ test('failed transfer migration rolls back the table rebuild without losing orig
   assert.ok(!retained.prepare("SELECT sql FROM sqlite_master WHERE name='transactions'").get().sql.includes("'transfer'"));
   retained.close();
   for (const suffix of ['', '-wal', '-shm']) if (existsSync(file + suffix)) unlinkSync(file + suffix);
+});
+
+test('bulk actions change many transactions atomically and deleted rows can be restored', async t => {
+  const { request } = await setup(t);
+  const fixed = (await request('/api/fixed-expenses', 'POST', { month: '2026-10', title: '관리비', amount: 50000, day: 10, category: 'home', method: '계좌이체' })).body;
+  const a = (await request('/api/transactions', 'POST', { ...sample, fixedExpenseId: fixed.id, importKey: 'e'.repeat(64) })).body;
+  const b = (await request('/api/transactions', 'POST', { ...sample, title: '저녁' })).body;
+  const income = (await request('/api/transactions', 'POST', { ...sample, type: 'income', category: 'salary' })).body;
+  const bulk = body => request('/api/transactions/bulk', 'POST', body);
+  assert.equal((await bulk({ action: 'category', ids: [a.id, b.id], category: 'cafe' })).status, 200);
+  assert.equal((await bulk({ action: 'category', ids: [a.id, income.id], category: 'cafe' })).status, 400);
+  assert.equal((await bulk({ action: 'move', ids: [a.id, income.id], type: 'saving' })).status, 409);
+  assert.equal((await bulk({ action: 'delete', ids: [a.id, 'missing'] })).status, 404);
+  let state = (await request('/api/state')).body;
+  assert.deepEqual(state.transactions.filter(t => t.type === 'expense').map(t => t.category), ['cafe', 'cafe']);
+  const before = state.transactions;
+  const removed = await bulk({ action: 'delete', ids: [a.id, b.id] });
+  assert.equal(removed.status, 200);
+  assert.equal((await request('/api/state')).body.transactions.length, 1);
+  assert.equal((await bulk({ action: 'restore', transactions: removed.body.deleted })).status, 201);
+  assert.equal((await bulk({ action: 'restore', transactions: removed.body.deleted })).status, 409);
+  state = (await request('/api/state')).body;
+  assert.deepEqual(new Set(state.transactions.map(t => JSON.stringify(t))), new Set(before.map(t => JSON.stringify(t))));
+  assert.equal((await bulk({ action: 'move', ids: [a.id, b.id], type: 'income' })).status, 200);
+  state = (await request('/api/state')).body;
+  assert.ok(state.transactions.every(t => t.type === 'income'));
+  assert.equal(state.transactions.find(t => t.id === a.id).fixedExpenseId, null);
 });

@@ -6,7 +6,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { z } from 'zod';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { categories, categorySchema, categoryBudgetSchema, createTransactionSchema, createFixedExpenseSchema, fallbackCategory, monthSchema, budgetSchema, backupSchema, shiftMonth, normalizeTransfer } from '../shared/ledger.js';
+import { categories, categorySchema, categoryBudgetSchema, createTransactionSchema, createFixedExpenseSchema, fallbackCategory, moveTargets, movedTransaction, categoryType, monthSchema, budgetSchema, backupSchema, shiftMonth, normalizeTransfer } from '../shared/ledger.js';
 import { legacyCategories } from '../shared/categories.js';
 import { assetSchema } from '../shared/assets.js';
 import { parseXlsx, describeImport, MAX_XLSX_BYTES } from './xlsx-import.js';
@@ -280,14 +280,63 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
     if (!result.changes) return res.status(404).json({ error: '기록을 찾을 수 없습니다.' });
     res.status(204).end();
   });
+  // Applies one change to many rows atomically: any invalid row rejects the whole request.
+  app.post('/api/transactions/bulk', (req, res) => {
+    const ids = z.array(z.string().min(1).max(100)).min(1).max(5000);
+    const body = parse(z.discriminatedUnion('action', [
+      z.object({ action: z.literal('delete'), ids }),
+      z.object({ action: z.literal('move'), ids, type: z.enum(['expense', 'saving', 'income']) }),
+      z.object({ action: z.literal('category'), ids, category: z.string().min(1).max(100) }),
+      z.object({ action: z.literal('restore'), transactions: z.array(z.object({ id: z.string().uuid() }).passthrough()).min(1).max(5000) }),
+    ]), req.body, res);
+    if (!body) return;
+    const list = categoryList();
+    if (body.action === 'restore') {
+      const schema = createTransactionSchema(list), fixedExists = db.prepare('SELECT id FROM fixed_expenses WHERE id=?');
+      const rows = [];
+      for (const raw of body.transactions) {
+        const t = schema.safeParse(raw);
+        if (!t.success) return res.status(400).json({ error: '복원할 내역을 확인해 주세요.', details: t.error.issues });
+        // A fixed expense removed since the delete just leaves the row unlinked.
+        rows.push([raw.id, { ...normalizeTransfer(t.data), fixedExpenseId: t.data.fixedExpenseId && fixedExists.get(t.data.fixedExpenseId) ? t.data.fixedExpenseId : null }]);
+      }
+      db.exec('BEGIN IMMEDIATE');
+      try { for (const [id, t] of rows) put(id, t); db.exec('COMMIT'); }
+      catch (error) { db.exec('ROLLBACK'); return res.status(409).json({ error: '이미 존재하거나 중복된 내역이 있어 복원하지 못했습니다.' }); }
+      return res.status(201).json({ restored: rows.length });
+    }
+    const unique = [...new Set(body.ids)];
+    const get = db.prepare('SELECT * FROM transactions WHERE id=?');
+    const rows = unique.map(id => get.get(id));
+    if (rows.some(t => !t)) return res.status(404).json({ error: '이미 삭제되었거나 찾을 수 없는 내역이 있습니다. 목록을 새로고침해 주세요.' });
+    if (body.action === 'move' && rows.some(t => !moveTargets[t.type]?.includes(body.type))) return res.status(409).json({ error: '지출↔저축, 지출↔수입 사이에서만 이동할 수 있습니다.' });
+    if (body.action === 'category') {
+      const category = list.find(c => c.id === body.category);
+      if (!category || rows.some(t => t.type === 'transfer' || categoryType(t.type) !== category.type)) return res.status(400).json({ error: '선택한 내역의 구분에 맞는 카테고리를 선택해 주세요.' });
+    }
+    const deleted = body.action === 'delete' ? rows.map(t => ({ ...t, isRefund: !!t.isRefund, importSource: t.importSource ? JSON.parse(t.importSource) : null })) : undefined;
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const remove = db.prepare('DELETE FROM transactions WHERE id=?');
+      const move = db.prepare('UPDATE transactions SET type=?,category=?,isRefund=?,fixedExpenseId=NULL WHERE id=?');
+      const recategorize = db.prepare('UPDATE transactions SET category=? WHERE id=?');
+      for (const t of rows) {
+        if (body.action === 'delete') remove.run(t.id);
+        else if (body.action === 'category') recategorize.run(body.category, t.id);
+        else { const m = movedTransaction({ ...t, isRefund: !!t.isRefund }, body.type); move.run(m.type, m.category, m.isRefund ? 1 : 0, t.id); }
+      }
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+    res.json({ changed: rows.length, deleted });
+  });
   app.post('/api/transactions/:id/move', (req, res) => {
-    const move = parse(z.object({ type: z.enum(['expense', 'saving']) }), req.body, res);
+    const move = parse(z.object({ type: z.enum(['expense', 'saving', 'income']) }), req.body, res);
     if (!move) return;
-    const previousType = move.type === 'saving' ? 'expense' : 'saving';
-    const existing = db.prepare('SELECT type FROM transactions WHERE id=?').get(req.params.id);
+    const existing = db.prepare('SELECT type, category, isRefund FROM transactions WHERE id=?').get(req.params.id);
     if (!existing) return res.status(404).json({ error: '기록을 찾을 수 없습니다.' });
-    if (existing.type !== previousType) return res.status(409).json({ error: '지출과 저축 내역 사이에서만 이동할 수 있습니다.' });
-    const result = db.prepare('UPDATE transactions SET type=?,fixedExpenseId=NULL WHERE id=? AND type=?').run(move.type, req.params.id, previousType);
+    if (!moveTargets[existing.type]?.includes(move.type)) return res.status(409).json({ error: '지출↔저축, 지출↔수입 사이에서만 이동할 수 있습니다.' });
+    const moved = movedTransaction({ ...existing, isRefund: !!existing.isRefund }, move.type);
+    const result = db.prepare('UPDATE transactions SET type=?,category=?,isRefund=?,fixedExpenseId=NULL WHERE id=? AND type=?').run(moved.type, moved.category, moved.isRefund ? 1 : 0, req.params.id, existing.type);
     if (!result.changes) return res.status(409).json({ error: '이미 변경된 내역입니다. 목록을 새로고침해 주세요.' });
     res.json({ id: req.params.id, type: move.type });
   });

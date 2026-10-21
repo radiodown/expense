@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as ContextMenu from '@radix-ui/react-context-menu';
 import { LayoutDashboard, Wallet, ArrowDownLeft, ArrowUpRight, ArrowLeftRight, ArrowUp, ArrowDown, ArrowUpDown, PiggyBank, ChartNoAxesCombined, Settings2, Plus, Pencil, Trash2, X, ChevronLeft, ChevronRight, Download, Search, Goal, Copy, Check, LoaderCircle, Database } from 'lucide-react';
-import { categories as defaultCategories, transferCategory, transactionTypes, transactionLabel, categoryType, refundLabel, methods, createTransactionSchema, createFixedExpenseSchema, today, currentMonth, categoryOf, won, cashValue } from '../shared/ledger.js';
+import { categories as defaultCategories, transferCategory, transactionTypes, transactionLabel, categoryType, refundLabel, methods, createTransactionSchema, createFixedExpenseSchema, today, currentMonth, categoryOf, won, cashValue, transactionValue, moveTargets, toTypeLabel } from '../shared/ledger.js';
 import InlineTransactionRow from './InlineTransactionRow.jsx';
 import { transactionColumns } from './transaction-sort.js';
 
@@ -23,16 +23,35 @@ export function Empty({ text = '등록된 내역이 없습니다.' }) { return <
 export function Metric({ title, value, note, tone = '' }) {
   return <div className={`metric ${tone}`}><span>{title}</span><strong>{value}</strong><small>{note}</small></div>;
 }
+// Same palette and order as the category expense chart.
+function categoryColor(id, categories) {
+  const category = categoryOf(id, categories);
+  const index = categories.filter(c => c.type === category.type).findIndex(c => c.id === category.id);
+  return index < 0 ? 'var(--muted)' : `var(--category-${index % 10 + 1})`;
+}
+// Korean public holidays. Fixed solar dates apply every year; lunar, substitute and election days are listed per year.
+const fixedHolidays = new Set(['01-01', '03-01', '05-05', '06-06', '08-15', '10-03', '10-09', '12-25']);
+const datedHolidays = new Set([
+  '2025-01-27', '2025-01-28', '2025-01-29', '2025-01-30', '2025-03-03', '2025-05-06', '2025-06-03', '2025-10-05', '2025-10-06', '2025-10-07', '2025-10-08',
+  '2026-02-16', '2026-02-17', '2026-02-18', '2026-03-02', '2026-05-24', '2026-05-25', '2026-06-03', '2026-08-17', '2026-09-24', '2026-09-25', '2026-09-26', '2026-10-05',
+]);
+function weekdayClass(date) {
+  if (fixedHolidays.has(date.slice(5)) || datedHolidays.has(date)) return 'holiday';
+  const day = new Date(`${date}T00:00:00`).getDay();
+  return day === 0 ? 'holiday' : day === 6 ? 'saturday' : '';
+}
 function TransactionContextMenu({ transaction, onMakeFixed, onMove, disabled, children }) {
   const canMakeFixed = onMakeFixed && transaction.type === 'expense' && !transaction.fixedExpenseId && !transaction.isRefund;
-  const canMove = onMove && (transaction.type === 'expense' || transaction.type === 'saving');
-  if (disabled || (!canMakeFixed && !canMove)) return children;
+  const moveTypes = onMove ? moveTargets[transaction.type] || [] : [];
+  const canMove = moveTypes.length > 0;
+  if (!canMakeFixed && !canMove) return children;
+  // Keep the wrapper mounted while busy; unwrapping remounts every row and resets page scroll.
   return <ContextMenu.Root modal={false}>
-    <ContextMenu.Trigger asChild className="transaction-context-row">{children}</ContextMenu.Trigger>
+    <ContextMenu.Trigger asChild disabled={disabled} className="transaction-context-row">{children}</ContextMenu.Trigger>
     <ContextMenu.Portal>
       <ContextMenu.Content className="transaction-context-menu" collisionPadding={8} aria-label={`${transaction.title} 작업`}>
         {canMakeFixed && <ContextMenu.Item className="transaction-context-item" onSelect={() => onMakeFixed(transaction)}>고정지출 등록</ContextMenu.Item>}
-        {canMove && <ContextMenu.Item className="transaction-context-item" onSelect={() => onMove(transaction, transaction.type === 'expense' ? 'saving' : 'expense')}>{transaction.type === 'expense' ? '저축으로 보내기' : '지출로 되돌리기'}</ContextMenu.Item>}
+        {moveTypes.map(type => <ContextMenu.Item key={type} className="transaction-context-item" onSelect={() => onMove(transaction, type)}>{toTypeLabel(type)} 옮기기</ContextMenu.Item>)}
       </ContextMenu.Content>
     </ContextMenu.Portal>
   </ContextMenu.Root>;
@@ -45,7 +64,7 @@ function TransactionColumnHeader({ column, sort, onSort, disabled }) {
     </button> : column.label}
   </th>;
 }
-export function TransactionTable({ items, categories = defaultCategories, onEdit, onInlineSave, fixedExpenses = [], transactions = [], onDelete, onMakeFixed, onMove, busy, scrollRef, scrollLabel, footer, pageScroll = false, sort, onSort }) {
+export function TransactionTable({ items, categories = defaultCategories, onEdit, onInlineSave, fixedExpenses = [], transactions = [], onDelete, onMakeFixed, onMove, busy, scrollRef, scrollLabel, footer, pageScroll = false, sort, onSort, selection }) {
   const [editingId, setEditingId] = useState(null);
   const activeEditingId = items.some(t => t.id === editingId) ? editingId : null;
   const actionsDisabled = busy || activeEditingId !== null;
@@ -54,18 +73,60 @@ export function TransactionTable({ items, categories = defaultCategories, onEdit
     else onEdit(item);
   }
   if (!items.length) return <Empty />;
-  return <div className={`table-scroll${pageScroll ? ' page-scroll-table' : ''}`} ref={scrollRef} role={scrollLabel ? 'region' : undefined} aria-label={scrollLabel} tabIndex={scrollLabel ? 0 : undefined}><table><thead><tr>{transactionColumns.map(column => <TransactionColumnHeader key={column.key} column={column} sort={sort} onSort={onSort} disabled={actionsDisabled} />)}<th scope="col" className="actions-cell">관리</th></tr></thead>
-    <tbody>{items.map(t => activeEditingId === t.id ? <InlineTransactionRow key={t.id} transaction={t} categories={categories} fixedExpenses={fixedExpenses} transactions={transactions} busy={busy} onSave={onInlineSave} onClose={() => setEditingId(null)} /> : <TransactionContextMenu key={t.id} transaction={t} onMakeFixed={onMakeFixed} onMove={onMove} disabled={actionsDisabled}><tr>
-      <td className="nowrap">{t.date}</td><td><span className={`badge ${t.type}`}>{t.fixedExpenseId ? '고정지출' : transactionLabel(t)}</span>{t.isRefund && <small className="cell-note">{refundLabel(t.type, t.importSource)}</small>}</td>
-      <td className="title-cell"><button className="link-button" disabled={actionsDisabled} onClick={() => edit(t)}>{t.title}</button></td><td>{categoryOf(t.category, categories).name}{t.importSource && <small className="cell-note">원본: {[t.importSource.category, t.importSource.subcategory].filter(Boolean).join(' / ')}</small>}</td><td>{t.method}</td>
+  return <div className={`table-scroll${pageScroll ? ' page-scroll-table' : ''}`} ref={scrollRef} role={scrollLabel ? 'region' : undefined} aria-label={scrollLabel} tabIndex={scrollLabel ? 0 : undefined}><table><thead><tr>{selection && <th scope="col" className="select-cell"><SelectAllBox selection={selection} disabled={actionsDisabled} /></th>}{transactionColumns.map(column => <TransactionColumnHeader key={column.key} column={column} sort={sort} onSort={onSort} disabled={actionsDisabled} />)}<th scope="col" className="actions-cell">관리</th></tr></thead>
+    <tbody>{items.map(t => activeEditingId === t.id ? <InlineTransactionRow key={t.id} selectable={!!selection} transaction={t} categories={categories} fixedExpenses={fixedExpenses} transactions={transactions} busy={busy} onSave={onInlineSave} onClose={() => setEditingId(null)} /> : <TransactionContextMenu key={t.id} transaction={t} onMakeFixed={onMakeFixed} onMove={onMove} disabled={actionsDisabled}><tr className={selection?.ids.has(t.id) ? 'selected-row' : undefined}>
+      {selection && <td className="select-cell"><input type="checkbox" aria-label={`${t.title} 선택`} disabled={actionsDisabled} checked={selection.ids.has(t.id)} onChange={() => {}} onClick={e => selection.toggle(t.id, e.shiftKey)} /></td>}
+      <td className={`nowrap ${weekdayClass(t.date)}`}>{t.date}{t.importSource?.time && <small className="cell-note">{t.importSource.time.slice(0, 5)}</small>}</td><td><span className={`badge ${t.fixedExpenseId ? 'fixed' : t.type}`}>{t.fixedExpenseId ? '고정지출' : transactionLabel(t)}</span>{t.isRefund && <small className="cell-note">{refundLabel(t.type, t.importSource)}</small>}</td>
+      <td className="title-cell"><button className="link-button" disabled={actionsDisabled} onClick={() => edit(t)}>{t.title}</button></td><td><span className="category-label"><i aria-hidden="true" style={{ background: categoryColor(t.category, categories) }} />{categoryOf(t.category, categories).name}</span>{t.importSource && <small className="cell-note">원본: {[t.importSource.category, t.importSource.subcategory].filter(Boolean).join(' / ')}</small>}</td><td>{t.method}</td>
       <td className={`number nowrap ${t.type}`}>{cashValue(t) >= 0 ? '+' : '−'}{won(t.amount)}</td>
       <td><div className="row-actions"><button className="table-button" disabled={actionsDisabled} aria-label={`${t.title} 수정`} onClick={() => edit(t)}>수정</button><button className="table-button danger-text" disabled={actionsDisabled} aria-label={`${t.title} 삭제`} onClick={() => onDelete(t)}>삭제</button></div></td>
     </tr></TransactionContextMenu>)}</tbody>{footer}</table></div>;
 }
 
+function SelectAllBox({ selection, disabled }) {
+  const ref = useRef(null);
+  const { count, total } = selection;
+  useEffect(() => { if (ref.current) ref.current.indeterminate = count > 0 && count < total; }, [count, total]);
+  return <input ref={ref} type="checkbox" aria-label={`조회된 ${total}건 모두 선택`} disabled={disabled} checked={total > 0 && count === total} onChange={() => selection.toggleAll()} />;
+}
+function BulkActionBar({ items, type, categories, busy, onBulk, onClear }) {
+  const [category, setCategory] = useState('');
+  const ids = items.map(t => t.id);
+  const run = (action, extra) => onBulk(action, ids, extra).then(onClear, () => {});
+  // Like a spreadsheet status bar; refunds count negative, same as the list total.
+  const sum = items.reduce((total, t) => total + transactionValue(t), 0);
+  return <div className="bulk-bar" role="toolbar" aria-label="선택한 내역 일괄 작업">
+    <div className="bulk-stats" role="status" aria-live="polite"><strong>{ids.length}건 선택</strong><span>합계 <b>{won(sum)}</b></span><span>평균 <b>{won(Math.round(sum / ids.length))}</b></span></div>
+    <label className="bulk-category"><span className="sr-only">카테고리 일괄 변경</span><select value={category} disabled={busy || type === 'transfer'} onChange={e => setCategory(e.target.value)}><option value="">카테고리 변경…</option>{categories.filter(c => c.type === categoryType(type)).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
+    <button className="button" disabled={busy || !category} onClick={() => run('category', { category }).then(() => setCategory(''))}>적용</button>
+    {(moveTargets[type] || []).map(target => <button key={target} className="button" disabled={busy} onClick={() => run('move', { type: target })}>{toTypeLabel(target)} 옮기기</button>)}
+    <button className="button danger" disabled={busy} onClick={() => run('delete')}>삭제</button>
+    <button className="link-button" disabled={busy} onClick={onClear}>선택 해제</button>
+  </div>;
+}
+
 const TRANSACTION_BATCH_SIZE = 30;
-export function InfiniteTransactionList({ items, total, label, totalLabel = '조회 합계', pageScroll = false, ...tableProps }) {
+export function InfiniteTransactionList({ items, total, label, totalLabel = '조회 합계', pageScroll = false, onBulk, type, ...tableProps }) {
   const [limit, setLimit] = useState(TRANSACTION_BATCH_SIZE);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const anchorRef = useRef(null);
+  // Rows deleted or moved out of this list drop out of the selection on their own.
+  const selectedItems = items.filter(t => selectedIds.has(t.id));
+  const ids = new Set(selectedItems.map(t => t.id));
+  const clearSelection = () => { setSelectedIds(new Set()); anchorRef.current = null; };
+  const selection = onBulk && {
+    ids, count: ids.size, total: items.length,
+    toggleAll: () => setSelectedIds(ids.size === items.length ? new Set() : new Set(items.map(t => t.id))),
+    // Shift-click selects the range from the last clicked row, matching its checked state.
+    toggle: (id, range) => {
+      const index = items.findIndex(t => t.id === id), anchor = items.findIndex(t => t.id === anchorRef.current);
+      const checked = !ids.has(id), next = new Set(ids);
+      const span = range && anchor >= 0 ? items.slice(Math.min(anchor, index), Math.max(anchor, index) + 1) : [items[index]];
+      for (const t of span) checked ? next.add(t.id) : next.delete(t.id);
+      anchorRef.current = id;
+      setSelectedIds(next);
+    },
+  };
   const scrollRef = useRef(null);
   const sentinelRef = useRef(null);
   const visibleCount = Math.min(limit, items.length);
@@ -90,8 +151,9 @@ export function InfiniteTransactionList({ items, total, label, totalLabel = '조
   }, [hasMore, limit, items.length, pageScroll]);
 
   return <>
-    <TransactionTable {...tableProps} items={items.slice(0, visibleCount)} pageScroll={pageScroll} scrollRef={scrollRef} scrollLabel={pageScroll ? label : `${label} 스크롤 영역`} footer={
-      <tfoot className="infinite-scroll-footer"><tr ref={sentinelRef}><td colSpan={7}>{hasMore ? '아래로 스크롤하면 다음 내역이 이어집니다.' : '마지막 내역입니다.'}</td></tr></tfoot>
+    {selection && selectedItems.length > 0 && <BulkActionBar items={selectedItems} type={type} categories={tableProps.categories} busy={tableProps.busy} onBulk={onBulk} onClear={clearSelection} />}
+    <TransactionTable {...tableProps} selection={selection} items={items.slice(0, visibleCount)} pageScroll={pageScroll} scrollRef={scrollRef} scrollLabel={pageScroll ? label : `${label} 스크롤 영역`} footer={
+      <tfoot className="infinite-scroll-footer"><tr ref={sentinelRef}><td colSpan={selection ? 8 : 7}>{hasMore ? '아래로 스크롤하면 다음 내역이 이어집니다.' : '마지막 내역입니다.'}</td></tr></tfoot>
     } />
     <div className="ledger-list-summary"><span>총 {items.length}건 · {totalLabel} <strong>{won(total)}</strong></span><span role="status" aria-live="polite">{visibleCount} / {items.length}건 표시</span></div>
   </>;

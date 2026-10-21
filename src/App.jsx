@@ -5,7 +5,7 @@ import { Icon, Modal, Empty, Metric, InfiniteTransactionList, TransactionForm, F
 import { sortTransactions } from './transaction-sort.js';
 import { ThemeSelector } from './Theme.jsx';
 import ExpenseHeatmap from './ExpenseHeatmap.jsx';
-import { categories as defaultCategories, transactionTypes, categoryType, fallbackCategory, today, currentMonth, monthLabel, shiftMonth, won, summary, trends, categoryTotals, categoryOf, makeDemo, backupSchema, budgetSummary, fixedDate, transactionValue } from '../shared/ledger.js';
+import { categories as defaultCategories, transactionTypes, categoryType, fallbackCategory, today, currentMonth, monthLabel, shiftMonth, won, summary, trends, categoryTotals, categoryOf, moveTargets, movedTransaction, toTypeLabel, makeDemo, backupSchema, budgetSummary, fixedDate, transactionValue } from '../shared/ledger.js';
 
 const FlowChart = lazy(() => import('./Charts.jsx'));
 const CategoryExpenseChart = lazy(() => import('./Charts.jsx').then(m => ({ default: m.CategoryExpenseChart })));
@@ -107,13 +107,21 @@ export default function App() {
         if (action === 'saveCategory' && categories.some(c => c.id !== id && c.type === payload.type && c.name.toLowerCase() === payload.name.toLowerCase())) throw new Error('같은 이름의 카테고리가 있습니다.');
         const original = action === 'makeFixed' || action === 'move' ? demo.transactions.find(t => t.id === id) : null;
         if (action === 'makeFixed' && (!original || original.type !== 'expense' || original.isRefund || original.fixedExpenseId)) throw new Error('이미 연결되었거나 고정지출로 등록할 수 없는 내역입니다.');
-        if (action === 'move' && (!original || !['expense', 'saving'].includes(payload.type) || original.type !== (payload.type === 'saving' ? 'expense' : 'saving'))) throw new Error('지출과 저축 내역 사이에서만 이동할 수 있습니다.');
+        if (action === 'bulk' && payload.action === 'move' && demo.transactions.some(t => payload.ids.includes(t.id) && !moveTargets[t.type]?.includes(payload.type))) throw new Error('지출↔저축, 지출↔수입 사이에서만 이동할 수 있습니다.');
+        if (action === 'move' && (!original || !moveTargets[original.type]?.includes(payload.type))) throw new Error('지출↔저축, 지출↔수입 사이에서만 이동할 수 있습니다.');
         setDemo(d => {
           if (action === 'saveAsset') return { ...d, assets: id ? d.assets.map(asset => asset.id === id ? { ...payload, id } : asset) : [{ ...payload, id: generatedId }, ...d.assets] };
           if (action === 'deleteAsset') return { ...d, assets: d.assets.filter(asset => asset.id !== id) };
           if (action === 'save') return { ...d, transactions: id ? d.transactions.map(t => t.id === id ? { ...payload, id } : t) : [{ ...payload, id: generatedId }, ...d.transactions] };
           if (action === 'delete') return { ...d, transactions: d.transactions.filter(t => t.id !== id) };
-          if (action === 'move') return { ...d, transactions: d.transactions.map(t => t.id === id ? { ...t, type: payload.type, fixedExpenseId: null } : t) };
+          if (action === 'undoDelete') return { ...d, transactions: [payload, ...d.transactions] };
+          if (action === 'bulk') {
+            const ids = new Set(payload.ids);
+            if (payload.action === 'delete') return { ...d, transactions: d.transactions.filter(t => !ids.has(t.id)) };
+            return { ...d, transactions: d.transactions.map(t => !ids.has(t.id) ? t : payload.action === 'move' ? movedTransaction(t, payload.type) : { ...t, category: payload.category }) };
+          }
+          if (action === 'bulkRestore') return { ...d, transactions: [...payload, ...d.transactions] };
+          if (action === 'move') return { ...d, transactions: d.transactions.map(t => t.id === id ? movedTransaction(t, payload.type) : t) };
           if (action === 'budget') return { ...d, budgets: { ...d.budgets, [targetMonth]: payload.amount } };
           if (action === 'categoryBudgets') return { ...d, categoryBudgets: { ...d.categoryBudgets, [targetMonth]: payload.amounts } };
           if (action === 'saveCategory') return { ...d, categories: id ? d.categories.map(c => c.id === id ? { ...payload, id } : c) : [...d.categories, { ...payload, id: generatedId }] };
@@ -142,6 +150,9 @@ export default function App() {
       if (action === 'saveAsset') return api(`/assets${id ? `/${id}` : ''}`, id ? 'PUT' : 'POST', payload);
       if (action === 'deleteAsset') return api(`/assets/${id}`, 'DELETE');
       if (action === 'delete') return api(`/transactions/${id}`, 'DELETE');
+      if (action === 'bulk') return api('/transactions/bulk', 'POST', payload);
+      if (action === 'bulkRestore') return api('/transactions/bulk', 'POST', { action: 'restore', transactions: payload });
+      if (action === 'undoDelete') { const { id: _id, ...fields } = payload; return api('/transactions', 'POST', fields); }
       if (action === 'move') return api(`/transactions/${id}/move`, 'POST', payload);
       if (action === 'budget') return api(`/budgets/${targetMonth}`, 'PUT', payload);
       if (action === 'categoryBudgets') return api(`/budgets/${targetMonth}/categories`, 'PUT', payload);
@@ -153,11 +164,20 @@ export default function App() {
       if (action === 'copyFixed') return api(`/budgets/${targetMonth}/copy-fixed`, 'POST', {});
       if (action === 'restore') return api('/restore', 'POST', payload);
     },
-    onSuccess: async (_result, { action, payload }) => {
+    onSuccess: async (_result, { action, payload, deleted }) => {
       await client.invalidateQueries({ queryKey: ['ledger'] });
       setEntry(null); setFixedEntry(null); setAssetEntry(null); setBudgetOpen(false); setRestore(null);
       if (action === 'deleteCategory') setCategory('all');
-      toast.success(demo ? '데모 데이터에 반영했습니다.' : action === 'move' ? payload.type === 'saving' ? '저축으로 이동했습니다.' : '지출로 되돌렸습니다.' : action === 'makeFixed' ? '고정지출로 등록하고 기존 지출을 지급 완료로 연결했습니다.' : action.startsWith('delete') ? '삭제했습니다.' : '변경사항을 저장했습니다.');
+      // The deleted row rides along as payload so the toast can recreate it.
+      if (action === 'delete' && payload) { toast.success(`'${payload.title}' 내역을 삭제했습니다.`, { duration: 8000, action: { label: '되돌리기', onClick: () => mutation.mutate({ action: 'undoDelete', payload }) } }); return; }
+      if (action === 'undoDelete' || action === 'bulkRestore') { toast.success('삭제를 취소했습니다.'); return; }
+      if (action === 'bulk') {
+        const count = payload.ids.length;
+        if (payload.action === 'delete') toast.success(`${count}건을 삭제했습니다.`, { duration: 8000, action: { label: '되돌리기', onClick: () => mutation.mutate({ action: 'bulkRestore', payload: deleted }) } });
+        else toast.success(payload.action === 'move' ? `${count}건을 ${toTypeLabel(payload.type)} 옮겼습니다.` : `${count}건의 카테고리를 바꿨습니다.`);
+        return;
+      }
+      toast.success(demo ? '데모 데이터에 반영했습니다.' : action === 'move' ? `${toTypeLabel(payload.type)} 옮겼습니다.` : action === 'makeFixed' ? '고정지출로 등록하고 기존 지출을 지급 완료로 연결했습니다.' : action.startsWith('delete') ? '삭제했습니다.' : '변경사항을 저장했습니다.');
     },
     onError: error => toast.error(error.message),
   });
@@ -222,7 +242,7 @@ export default function App() {
           <div className="filters"><label className="search-field"><span>검색</span><input placeholder="내용 또는 카테고리" value={search} onChange={e => setSearch(e.target.value)} /></label><label>카테고리<select value={category} onChange={e => setCategory(e.target.value)}><option value="all">전체 카테고리</option>{categories.filter(c => c.type === categoryType(view)).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
             {view === 'expense' && <label>지출 구분<select value={kind} onChange={e => setKind(e.target.value)}><option value="all">전체 지출</option><option value="fixed">고정지출</option><option value="variable">일반 지출</option><option value="transfer">이체 내역</option></select></label>}
             <button className="button" onClick={() => { setSearch(''); setCategory('all'); setKind('all'); setSort({ key: 'date', direction: 'desc' }); }}>필터 초기화</button></div>
-          <InfiniteTransactionList key={JSON.stringify([view, month, search, category, kind, sort, !!demo])} items={filtered} total={filteredTotal} totalLabel="조회 합계" label={`${transactionTypes[view]} 목록`} pageScroll sort={sort} onSort={sortColumn} categories={categories} busy={busy} onEdit={setEntry} fixedExpenses={fixedExpenses} transactions={data.transactions} onInlineSave={(payload, id) => mutation.mutateAsync({ action: 'save', payload, id })} onDelete={item => save('delete', undefined, item.id)} onMakeFixed={item => save('makeFixed', undefined, item.id)} onMove={(item, type) => save('move', { type }, item.id)} />
+          <InfiniteTransactionList key={JSON.stringify([view, month, search, category, kind, sort, !!demo])} items={filtered} total={filteredTotal} totalLabel="조회 합계" label={`${transactionTypes[view]} 목록`} pageScroll sort={sort} onSort={sortColumn} categories={categories} busy={busy} onEdit={setEntry} fixedExpenses={fixedExpenses} transactions={data.transactions} onInlineSave={(payload, id) => mutation.mutateAsync({ action: 'save', payload, id })} onDelete={item => save('delete', item, item.id)} onMakeFixed={item => save('makeFixed', undefined, item.id)} onMove={(item, type) => save('move', { type }, item.id)} type={view} onBulk={(bulkAction, ids, extra) => mutation.mutateAsync({ action: 'bulk', payload: { action: bulkAction, ids, ...extra }, deleted: bulkAction === 'delete' ? data.transactions.filter(t => ids.includes(t.id)) : undefined })} />
         </Panel>
       </>}
 

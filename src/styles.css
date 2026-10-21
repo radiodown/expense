@@ -49,6 +49,8 @@
   --warning-notice-bg: #fff0e2;
   --transfer: #55516d;
   --transfer-bg: #efedf5;
+  --fixed: #6b3fc4;
+  --fixed-bg: #f3edff;
   --badge-bg: #f0f0f5;
   --notice-bg: #e7effa;
   --notice-text: #365b88;
@@ -127,6 +129,8 @@
   --warning-notice-bg: #44351f;
   --transfer: #c5bbec;
   --transfer-bg: #343044;
+  --fixed: #c9a8ff;
+  --fixed-bg: #362a4f;
   --badge-bg: #303034;
   --notice-bg: #263549;
   --notice-text: #b2cdf2;
@@ -288,6 +292,20 @@ tfoot th, tfoot td { background: var(--surface-header); border-top: 1px solid va
 .badge.income { color: var(--accent); background: var(--selected-bg); }
 .badge.expense { color: var(--expense-badge); background: var(--expense-bg); }
 .badge.transfer { color: var(--transfer); background: var(--transfer-bg); }
+.badge.fixed { color: var(--fixed); background: var(--fixed-bg); }
+td.saturday { color: var(--accent); }
+td.holiday { color: var(--expense); }
+.category-label { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.category-label>i { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+.select-cell { width: 36px; padding-right: 0 !important; }
+.select-cell input { width: 16px; height: 16px; margin: 0; vertical-align: middle; cursor: pointer; }
+/* Floats over the list so it stays reachable while scrolling a long selection. */
+.bulk-bar { position: fixed; z-index: 40; bottom: 24px; left: calc(50% + var(--sidebar-width) / 2); transform: translateX(-50%); width: max-content; max-width: calc(100vw - var(--sidebar-width) - 32px); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 14px; background: var(--surface); box-shadow: 0 8px 40px var(--modal-shadow); border: 1px solid var(--border); }
+.bulk-stats { display: flex; align-items: baseline; gap: 12px; margin-right: 6px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.bulk-stats strong { font-size: 14px; color: var(--text); }
+.bulk-stats b { color: var(--text); font-weight: 700; }
+.bulk-bar select { min-width: 140px; }
+@media (max-width: 700px) { .bulk-bar { left: 50%; bottom: calc(80px + env(safe-area-inset-bottom)); max-width: calc(100vw - 32px); } }
 .badge.saving { color: var(--saving); background: var(--saving-bg); }
 .badge.success { color: var(--success); background: var(--success-bg); }
 .badge.warning { color: var(--warning); background: var(--warning-bg); }

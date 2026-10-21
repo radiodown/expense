@@ -1,7 +1,7 @@
 import { useId, useRef, useState } from 'react';
 import { createTransactionSchema, methods, transactionTypes, categoryType, refundLabel, won } from '../shared/ledger.js';
 
-export default function InlineTransactionRow({ transaction, categories, fixedExpenses, transactions, onSave, onClose, busy }) {
+export default function InlineTransactionRow({ transaction, categories, fixedExpenses, transactions, onSave, onClose, busy, selectable = false }) {
   const [draft, setDraft] = useState({ ...transaction, isRefund: !!transaction.isRefund, fixedExpenseId: transaction.fixedExpenseId || null });
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
@@ -38,6 +38,7 @@ export default function InlineTransactionRow({ transaction, categories, fixedExp
 
   return <>
     <tr className="inline-edit-row" onKeyDown={keyDown}>
+      {selectable && <td className="select-cell" />}
       <td><input {...field} className="inline-date" aria-label="날짜" type="date" required min="1900-01-01" max="2100-12-31" value={draft.date} onChange={e => {
         const date = e.target.value;
         setDraft(d => ({ ...d, date, fixedExpenseId: d.date.slice(0, 7) === date.slice(0, 7) ? d.fixedExpenseId : null })); setError('');
@@ -61,7 +62,7 @@ export default function InlineTransactionRow({ transaction, categories, fixedExp
         <button type="button" className="table-button" disabled={locked} onClick={onClose}>취소</button>
       </form></td>
     </tr>
-    <tr className="inline-edit-details" onKeyDown={keyDown}><td colSpan={7}>
+    <tr className="inline-edit-details" onKeyDown={keyDown}><td colSpan={selectable ? 8 : 7}>
       <div className="inline-detail-content">
         {draft.type === 'expense' && !draft.isRefund && <label>고정지출 연결
           <select {...field} value={draft.fixedExpenseId || ''} onChange={e => set('fixedExpenseId', e.target.value || null)}>

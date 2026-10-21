@@ -6,6 +6,8 @@ import { storedAssetSchema, makeAssetDemo } from './assets.js';
 export { categories };
 export const methods = ['신용카드', '체크카드', '계좌이체', '현금'];
 export const transactionTypes = { income: '수입', expense: '지출', saving: '저축', transfer: '이체' };
+// '지출' ends in ㄹ, so it takes 로; the others take 으로.
+export const toTypeLabel = type => `${transactionTypes[type]}${type === 'expense' ? '로' : '으로'}`;
 export const categoryType = type => type === 'saving' ? 'expense' : type;
 export const refundLabel = (type, source) => type === 'saving' ? '취소·인출' : type === 'expense' && source?.type === '이체' ? '입금 (지출 차감)' : '취소·환급';
 export const transferCategory = { id: 'transfer', name: '이체', type: 'transfer', color: '#636366' };
@@ -16,6 +18,12 @@ export function normalizeTransfer(t) {
     importSource: t.importSource ? { ...t.importSource, type: '이체' } : null };
 }
 export const fallbackCategory = type => type === 'income' ? 'income-other' : 'other';
+// Corrections between ledgers. Crossing expense/income switches category lists, so the row lands in that side's 기타 as a plain entry.
+export const moveTargets = { expense: ['saving', 'income'], saving: ['expense'], income: ['expense'] };
+export function movedTransaction(t, type) {
+  const crossesCategories = categoryType(t.type) !== categoryType(type);
+  return { ...t, type, fixedExpenseId: null, ...(crossesCategories ? { category: fallbackCategory(type), isRefund: false } : {}) };
+}
 const categoryIdSchema = z.string().regex(/^[a-zA-Z0-9-]{1,64}$/);
 export const categorySchema = z.object({
   name: z.string().trim().min(1).max(40),

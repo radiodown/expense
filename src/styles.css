@@ -519,3 +519,6 @@ tr.selected-row { background: var(--selected-bg); }
   .asset-form .form-grid { grid-template-columns: 1fr; }
   .asset-composition { padding: 20px 15px; }
 }
+.import-from { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin-bottom: 16px; }
+.import-from label { display: grid; gap: 6px; }
+.import-from .help { flex-basis: 100%; margin: 0; }

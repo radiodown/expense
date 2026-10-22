@@ -113,3 +113,14 @@ test('actual sample second sheet matches independent monthly sums, with every ro
   assert.equal(parsed.records.length + parsed.skipped.length, raw.length - 1);
   assert.ok(backupSchema.safeParse({ version: 4, transactions: transactions.map((t, i) => ({ ...t, id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}` })), budgets: {}, fixedExpenses: [], categories, categoryBudgets: {} }).success);
 });
+test('a start date leaves earlier rows out while same-day imported rows stay duplicates', () => {
+  const at = (date, title) => [date, 0.5, '지출', '점심', '미분류', title, -1000, 'KRW', '현금', ''];
+  const parsed = parseLedgerRows([headers, at('2026-09-30', '구월'), at('2026-10-20', '이미 가져옴'), at('2026-10-20', '같은 날 새 내역'), at('2026-10-25', '이후')], 'resume.xlsx');
+  const imported = new Set([parsed.records[1].transaction.importKey]);
+  const preview = describeImport(parsed, imported, '2026-10-20');
+  const september = preview.months.find(m => m.month === '2026-09'), october = preview.months.find(m => m.month === '2026-10');
+  assert.deepEqual([september.available, september.beforeStart], [0, 1]);
+  assert.deepEqual([october.available, october.duplicates, october.beforeStart], [2, 1, 0]);
+  assert.deepEqual(preview.records.filter(r => r.beforeStart).map(r => r.transaction.title), ['구월']);
+  assert.equal(describeImport(parsed, imported).months.find(m => m.month === '2026-09').available, 1);
+});

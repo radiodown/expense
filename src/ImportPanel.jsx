@@ -12,7 +12,7 @@ function base64File(file) {
     reader.readAsDataURL(file);
   });
 }
-export default function ImportPanel({ request, categories, demo, onImported }) {
+export default function ImportPanel({ request, categories, demo, onImported, lastImportedDate }) {
   const filesQuery = useQuery({ queryKey: ['import-files'], queryFn: () => request('/imports/files') });
   const [fileName, setFileName] = useState('');
   const [preview, setPreview] = useState(null);
@@ -21,6 +21,7 @@ export default function ImportPanel({ request, categories, demo, onImported }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
+  const [from, setFrom] = useState('');
   const input = useRef();
   const files = filesQuery.data?.files || [];
   const activeFile = fileName || files[0] || '';
@@ -30,14 +31,14 @@ export default function ImportPanel({ request, categories, demo, onImported }) {
   const expense = selectedMonths.reduce((s, m) => s + m.expense, 0);
   const transferCount = selectedMonths.reduce((s, m) => s + m.transferCount, 0);
   const duplicates = selectedMonths.reduce((s, m) => s + m.duplicates, 0);
-  const records = preview?.records.filter(r => selected.includes(r.month)) || [];
+  const records = preview?.records.filter(r => selected.includes(r.month) && !r.beforeStart) || [];
   const excluded = preview?.skipped.filter(r => !r.month || selected.includes(r.month)) || [];
   function select(month) {
     setSelected(s => s.includes(month) ? s.filter(m => m !== month) : [...s, month]); setPage(1);
   }
   async function load(payload) {
     setBusy(true); setError(''); setPreview(null); setResult(null); setSelected([]); setPage(1);
-    try { setPreview(await request('/imports/preview', 'POST', payload)); }
+    try { setPreview(await request('/imports/preview', 'POST', { ...payload, from })); }
     catch (e) { setError(e.message); }
     finally { setBusy(false); }
   }
@@ -52,10 +53,23 @@ export default function ImportPanel({ request, categories, demo, onImported }) {
     catch (e) { setError(e.message); }
     finally { setBusy(false); }
   }
+  async function changeFrom(value) {
+    setFrom(value);
+    if (!preview || (value && !/^\d{4}-\d{2}-\d{2}$/.test(value))) return;
+    setBusy(true); setError('');
+    try {
+      const next = await request('/imports/refine', 'POST', { previewId: preview.previewId, from: value });
+      const open = next.months.filter(m => m.available > 0).map(m => m.month);
+      setPreview(next); setPage(1);
+      // Picking a start date means "everything from here", so select every month that still has new rows.
+      setSelected(s => value ? open : s.filter(m => open.includes(m)));
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  }
   async function commit() {
     setBusy(true); setError('');
     try {
-      const imported = await request('/imports/commit', 'POST', { previewId: preview.previewId, months: selected });
+      const imported = await request('/imports/commit', 'POST', { previewId: preview.previewId, months: selected, from: preview.from });
       setResult(imported);
       // A submitted preview is discarded so the displayed "new" counts cannot be reused accidentally.
       setPreview(null); setSelected([]);
@@ -85,8 +99,12 @@ export default function ImportPanel({ request, categories, demo, onImported }) {
       <div className="import-subheading"><div><h3>{preview.fileName}</h3><p className="help">두 번째 시트 · 수입·지출을 가져오며 이체는 지출에 포함합니다. 고정지출 예산 항목은 자동 생성하지 않습니다.</p></div></div>
       <div className="import-rules">{preview.reasons.length > 0 && <p>파일 전체 제외 내역: {preview.reasons.map(r => `${r.reason} ${r.count}건`).join(' · ')}</p>}<p>지출의 음수 금액은 지출액으로, 양수 금액은 취소·환급으로 읽습니다. 환급은 지출 합계에서 차감됩니다.</p><p>이체도 지출 목록과 합계에 포함합니다. 음수는 출금으로 지출에 더하고, 양수는 입금으로 지출에서 차감합니다.</p><p>원본 분류는 아래 미리보기와 가져온 거래에 보존됩니다. 수입·지출에서 알 수 없는 분류는 기타 수입·지출로 연결됩니다.</p></div>
       <fieldset className="import-preview" disabled={busy || demo}>
+        <div className="import-from"><label>이 날짜부터 가져오기<input type="date" min="1900-01-01" max="2100-12-31" value={from} onChange={e => changeFrom(e.target.value)} /></label>
+          {lastImportedDate && <button className="button subtle" onClick={() => changeFrom(lastImportedDate)}>마지막 가져온 날짜({lastImportedDate})부터</button>}
+          {from && <button className="link-button" onClick={() => changeFrom('')}>날짜 제한 해제</button>}
+          <p className="help">비워 두면 선택한 월 전체를 가져옵니다. 시작일 당일 내역 중 이미 가져온 것은 중복으로 건너뜁니다.</p></div>
         <div className="import-subheading"><h3>가져올 월 선택</h3><div className="toolbar"><button className="link-button" onClick={() => { setSelected(preview.months.filter(m => m.available > 0).map(m => m.month)); setPage(1); }}>전체 선택</button><button className="link-button" onClick={() => { setSelected([]); setPage(1); }}>선택 해제</button></div></div>
-        <div className="table-scroll"><table className="month-import-table"><thead><tr><th>선택</th><th>월</th><th className="number">새 수입</th><th className="number">수입 합계</th><th className="number">새 지출</th><th className="number">지출 합계</th><th className="number">환급 포함</th><th className="number">기존 중복</th><th className="number">제외</th></tr></thead><tbody>{preview.months.map(m => <tr key={m.month} className={selected.includes(m.month) ? 'selected-row' : ''}><td><input type="checkbox" aria-label={`${monthLabel(m.month)} 가져오기`} checked={selected.includes(m.month)} disabled={!m.available} onChange={() => select(m.month)} /></td><td className="nowrap"><label className="month-choice"><button className="link-button" disabled={!m.available} onClick={() => select(m.month)}>{monthLabel(m.month)}</button></label></td><td className="number">{m.incomeCount}건</td><td className="number income">{won(m.income)}</td><td className="number">{m.expenseCount}건{m.transferCount > 0 && <small className="cell-note">이체 {m.transferCount}건 포함</small>}</td><td className="number">{won(m.expense)}</td><td className="number">{m.refunds}건</td><td className="number">{m.duplicates}건</td><td className="number">{m.skipped}건</td></tr>)}</tbody></table></div>
+        <div className="table-scroll"><table className="month-import-table"><thead><tr><th>선택</th><th>월</th><th className="number">새 수입</th><th className="number">수입 합계</th><th className="number">새 지출</th><th className="number">지출 합계</th><th className="number">환급 포함</th><th className="number">기존 중복</th>{preview.from && <th className="number">시작일 이전</th>}<th className="number">제외</th></tr></thead><tbody>{preview.months.map(m => <tr key={m.month} className={selected.includes(m.month) ? 'selected-row' : ''}><td><input type="checkbox" aria-label={`${monthLabel(m.month)} 가져오기`} checked={selected.includes(m.month)} disabled={!m.available} onChange={() => select(m.month)} /></td><td className="nowrap"><label className="month-choice"><button className="link-button" disabled={!m.available} onClick={() => select(m.month)}>{monthLabel(m.month)}</button></label></td><td className="number">{m.incomeCount}건</td><td className="number income">{won(m.income)}</td><td className="number">{m.expenseCount}건{m.transferCount > 0 && <small className="cell-note">이체 {m.transferCount}건 포함</small>}</td><td className="number">{won(m.expense)}</td><td className="number">{m.refunds}건</td><td className="number">{m.duplicates}건</td>{preview.from && <td className="number">{m.beforeStart}건</td>}<td className="number">{m.skipped}건</td></tr>)}</tbody></table></div>
         {!preview.months.length && <Empty text="가져올 수 있는 월별 내역이 없습니다. 시트 내용과 제외 사유를 확인해 주세요." />}
         <div className="import-selection"><div><strong>{selected.length}개월 · 신규 {count}건 선택</strong><p>수입 {won(income)} · 지출 {won(expense)} · 중복 제외 {duplicates}건</p><p>지출에 이체 {transferCount}건 포함</p></div><button className="button primary" disabled={!count} onClick={commit}><Icon name="Plus" />선택한 월 가져오기</button></div>
       </fieldset>

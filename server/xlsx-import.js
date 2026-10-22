@@ -88,14 +88,15 @@ export async function parseXlsx(buffer, fileName) {
   }
   return parseLedgerRows(rows, fileName);
 }
-export function describeImport(parsed, existingKeys) {
-  const records = parsed.records.map(r => ({ ...r, duplicate: existingKeys.has(r.transaction.importKey) }));
+// `from` (YYYY-MM-DD) leaves earlier rows out, e.g. to resume after the last import.
+export function describeImport(parsed, existingKeys, from = '') {
+  const records = parsed.records.map(r => ({ ...r, duplicate: existingKeys.has(r.transaction.importKey), beforeStart: !!from && r.transaction.date < from }));
   const months = parsed.months.map(month => {
-    const rows = records.filter(r => r.month === month);
+    const all = records.filter(r => r.month === month), rows = all.filter(r => !r.beforeStart);
     const available = rows.filter(r => !r.duplicate);
     const transfers = transferSummary(available.map(r => r.transaction));
     return {
-      month, count: rows.length, available: available.length, duplicates: rows.length - available.length,
+      month, count: rows.length, available: available.length, duplicates: rows.length - available.length, beforeStart: all.length - rows.length,
       incomeCount: available.filter(r => r.transaction.type === 'income').length,
       expenseCount: available.filter(r => r.transaction.type === 'expense').length,
       transferCount: transfers.count, transferIn: transfers.incoming, transferOut: transfers.outgoing,
@@ -106,5 +107,5 @@ export function describeImport(parsed, existingKeys) {
     };
   });
   const reasons = Object.entries(parsed.skipped.reduce((s, r) => ({ ...s, [r.reason]: (s[r.reason] || 0) + 1 }), {})).map(([reason, count]) => ({ reason, count }));
-  return { fileName: parsed.fileName, sheet: 2, months, records, skipped: parsed.skipped, reasons };
+  return { fileName: parsed.fileName, sheet: 2, from, months, records, skipped: parsed.skipped, reasons };
 }

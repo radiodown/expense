@@ -203,13 +203,15 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
     }
   };
   const previews = new Map();
+  const importFrom = z.union([z.literal(''), z.string().regex(/^\d{4}-\d{2}-\d{2}$/)]).default('');
+  const importedKeys = () => new Set(db.prepare('SELECT importKey FROM transactions WHERE importKey IS NOT NULL').all().map(t => t.importKey));
   const listFiles = async () => {
     try { return (await readdir(sampleDirectory, { withFileTypes: true })).filter(f => f.isFile() && /\.xlsx$/i.test(f.name) && !f.name.startsWith('~$')).map(f => f.name).sort(); }
     catch (error) { if (error.code === 'ENOENT') return []; throw error; }
   };
   app.get('/api/imports/files', async (_req, res) => res.json({ files: await listFiles() }));
   app.post('/api/imports/preview', async (req, res) => {
-    const input = parse(z.object({ fileName: z.string().min(1).max(255).regex(/\.xlsx$/i), content: z.string().max(14 * 1024 * 1024).optional() }), req.body, res);
+    const input = parse(z.object({ fileName: z.string().min(1).max(255).regex(/\.xlsx$/i), content: z.string().max(14 * 1024 * 1024).optional(), from: importFrom }), req.body, res);
     if (!input) return;
     let buffer;
     if (input.content !== undefined) {
@@ -229,18 +231,25 @@ export function createApp(dbPath = path.join(root, 'data', 'ledger.sqlite'), { s
     while (previews.size >= 6) previews.delete(previews.keys().next().value);
     const previewId = randomUUID();
     previews.set(previewId, { parsed, expires: Date.now() + 30 * 60 * 1000 });
-    const existing = new Set(db.prepare('SELECT importKey FROM transactions WHERE importKey IS NOT NULL').all().map(t => t.importKey));
-    res.json({ previewId, ...describeImport(parsed, existing) });
+    res.json({ previewId, ...describeImport(parsed, importedKeys(), input.from) });
+  });
+  // Re-describes a loaded preview for a new start date without re-reading the file.
+  app.post('/api/imports/refine', (req, res) => {
+    const input = parse(z.object({ previewId: z.string().uuid(), from: importFrom }), req.body, res);
+    if (!input) return;
+    const preview = previews.get(input.previewId);
+    if (!preview || preview.expires < Date.now()) return res.status(410).json({ error: '미리보기가 만료되었습니다. 파일을 다시 읽어 주세요.' });
+    res.json({ previewId: input.previewId, ...describeImport(preview.parsed, importedKeys(), input.from) });
   });
   app.post('/api/imports/commit', (req, res) => {
-    const input = parse(z.object({ previewId: z.string().uuid(), months: z.array(monthSchema).min(1).max(2400) }), req.body, res);
+    const input = parse(z.object({ previewId: z.string().uuid(), months: z.array(monthSchema).min(1).max(2400), from: importFrom }), req.body, res);
     if (!input) return;
     const preview = previews.get(input.previewId);
     if (!preview || preview.expires < Date.now()) return res.status(410).json({ error: '미리보기가 만료되었습니다. 파일을 다시 읽어 주세요.' });
     if (input.months.some(m => !preview.parsed.months.includes(m))) return res.status(400).json({ error: '파일에 없는 월이 선택되었습니다.' });
     normalizeImportCategories(preview.parsed);
     const selected = new Set(input.months);
-    const records = preview.parsed.records.filter(r => selected.has(r.month));
+    const records = preview.parsed.records.filter(r => selected.has(r.month) && (!input.from || r.transaction.date >= input.from));
     let imported = 0, duplicates = 0, income = 0, expense = 0, transfer = 0;
     const exists = db.prepare('SELECT id FROM transactions WHERE importKey=?');
     db.exec('BEGIN IMMEDIATE');
